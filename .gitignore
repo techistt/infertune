@@ -1,0 +1,17 @@
+node_modules/
+
+venv/
+
+__pycache__/
+
+*.pyc
+
+.env
+
+dist/
+
+build/
+
+*.log
+
+.vscode/settings.json
