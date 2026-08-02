@@ -1,10 +1,10 @@
 import { Cpu, MemoryStick, Clock3 } from "lucide-react";
 import { useAppStore } from "../store/useAppStore";
- 
+
 
 export default function Header() {
-  
-   const { model } = useAppStore();
+
+  const { model } = useAppStore();
 
   return (
     <header className="h-16 border-b border-gray-800 bg-gray-900 px-6 flex items-center justify-between">

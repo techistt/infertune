@@ -12,17 +12,17 @@ export default function Dashboard() {
       <div className="flex flex-1 flex-col">
         <Header />
 
-        <main className="flex-1 p-6 overflow-hidden">
-          <div className="grid h-full grid-cols-12 gap-5">
-            <div className="col-span-3">
+        <main className="flex-1 min-h-0 p-6 overflow-hidden">
+          <div className="grid h-full min-h-0 grid-cols-12 gap-5">
+            <div className="col-span-3 min-h-0">
               <ParameterPanel />
             </div>
 
-            <div className="col-span-5">
+            <div className="col-span-5 min-h-0">
               <PromptEditor />
             </div>
 
-            <div className="col-span-4">
+            <div className="col-span-4 min-h-0">
               <ResponsePanel />
             </div>
           </div>

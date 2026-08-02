@@ -1,30 +1,58 @@
+import { useEffect, useState } from "react";
+import { getModels } from "../services/modelService";
 import { useAppStore } from "../store/useAppStore";
 
 export default function ParameterPanel() {
-  const {
-  model,
-  temperature,
-  topP,
-  topK,
-  maxTokens,
-  seed,
+  const [models, setModels] = useState<string[]>([]);
+  useEffect(() => {
 
-  setModel,
-  setTemperature,
-  setTopP,
-  setTopK,
-  setMaxTokens,
-  setSeed,
-} = useAppStore();
+    async function loadModels() {
+
+      try {
+        const result = await getModels();
+
+        setModels(result);
+
+        if (result.length > 0) {
+          setModel(result[0]);
+        }
+
+      } catch (error) {
+        console.error(
+          "Failed to load models:",
+          error
+        );
+      }
+    }
+
+
+    loadModels();
+
+  }, []);
+  const {
+    model,
+    temperature,
+    topP,
+    topK,
+    maxTokens,
+    seed,
+
+    setModel,
+    setTemperature,
+    setTopP,
+    setTopK,
+    setMaxTokens,
+    setSeed,
+  } = useAppStore();
 
   const resetValues = () => {
-  setModel("Llama 3.1");
-  setTemperature(0.7);
-  setTopP(0.9);
-  setTopK(40);
-  setMaxTokens(1024);
-  setSeed(42);
-};
+    setModel("hermes3:latest");
+    setTemperature(0.7);
+    setTopP(0.9);
+    setTopK(40);
+    setMaxTokens(1024);
+    setSeed(42);
+  };
 
   return (
     <div className="rounded-xl border border-gray-800 bg-gray-900 p-5">
@@ -42,10 +70,14 @@ export default function ParameterPanel() {
             onChange={(e) => setModel(e.target.value)}
             className="w-full rounded-lg bg-gray-800 p-2"
           >
-            <option>Llama 3.1</option>
-            <option>Mistral</option>
-            <option>DeepSeek</option>
-            <option>Phi-3</option>
+            {models.map((modelName) => (
+              <option
+                key={modelName}
+                value={modelName}
+              >
+                {modelName}
+              </option>
+            ))}
           </select>
         </div>
 

@@ -12,6 +12,9 @@ interface AppState {
   userPrompt: string;
 
   response: string;
+  tokens: number;
+  generationTime: number;
+  tokensPerSecond: number;
 
   setModel: (value: string) => void;
   setTemperature: (value: number) => void;
@@ -24,10 +27,15 @@ interface AppState {
   setUserPrompt: (value: string) => void;
 
   setResponse: (value: string) => void;
+
+  setMetrics: (
+    tokens: number,
+    generationTime: number
+  ) => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
-  model: "Llama 3.1",
+  model: "hermes3:latest",
   temperature: 0.7,
   topP: 0.9,
   topK: 40,
@@ -38,6 +46,9 @@ export const useAppStore = create<AppState>((set) => ({
   userPrompt: "",
 
   response: "",
+  tokens: 0,
+  generationTime: 0,
+  tokensPerSecond: 0,
 
   setModel: (model) => set({ model }),
   setTemperature: (temperature) => set({ temperature }),
@@ -50,4 +61,23 @@ export const useAppStore = create<AppState>((set) => ({
   setUserPrompt: (userPrompt) => set({ userPrompt }),
 
   setResponse: (response) => set({ response }),
+
+  setMetrics: (
+    tokens,
+    generationTime
+  ) =>
+    set({
+      tokens,
+      generationTime,
+      tokensPerSecond:
+        generationTime > 0
+          ? Number(
+            (
+              tokens /
+              (generationTime / 1000)
+            ).toFixed(2)
+          )
+          : 0,
+    }),
+
 }));

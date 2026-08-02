@@ -1,37 +1,49 @@
 import { useAppStore } from "../store/useAppStore";
+import { generateText } from "../services/llmService";
 
 export default function PromptEditor() {
- const {
-  systemPrompt,
-  userPrompt,
-  setSystemPrompt,
-  setUserPrompt,
-} = useAppStore();
+  const {
+    systemPrompt,
+    userPrompt,
+    setSystemPrompt,
+    setUserPrompt,
+    setResponse,
+    setMetrics,
+  } = useAppStore();
 
   const clearPrompts = () => {
-  setSystemPrompt("You are a helpful AI assistant.");
-  setUserPrompt("");
-};
+    setSystemPrompt("You are a helpful AI assistant.");
+    setUserPrompt("");
+  };
 
-  const generateResponse = () => {
-  const state = useAppStore.getState();
+  const generateResponse = async () => {
 
-  console.clear();
+    const state = useAppStore.getState();
 
-  console.log("========== InferTune ==========");
-  console.log("Model:", state.model);
-  console.log("Temperature:", state.temperature);
-  console.log("Top P:", state.topP);
-  console.log("Top K:", state.topK);
-  console.log("Max Tokens:", state.maxTokens);
-  console.log("Seed:", state.seed);
+    const result = await generateText({
+      model: state.model,
 
-  console.log("System Prompt:");
-  console.log(state.systemPrompt);
+      systemPrompt: state.systemPrompt,
+      userPrompt: state.userPrompt,
 
-  console.log("User Prompt:");
-  console.log(state.userPrompt);
-};
+      temperature: state.temperature,
+      topP: state.topP,
+      topK: state.topK,
+
+      maxTokens: state.maxTokens,
+      seed: state.seed,
+    });
+
+    console.log("RECEIVED FROM RUST:", result);
+
+
+    setResponse(result.text)
+
+    setMetrics(
+      result.tokens,
+      result.generationTime
+    )
+  };
 
   return (
     <div className="rounded-xl border border-gray-800 bg-gray-900 p-5 h-full">
