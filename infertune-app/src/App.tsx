@@ -1,11 +1,7 @@
+import Dashboard from "./pages/Dashboard";
+
 function App() {
-  return (
-    <div className="min-h-screen bg-gray-900 text-white flex items-center justify-center">
-      <h1 className="text-5xl font-bold">
-        InferTune
-      </h1>
-    </div>
-  );
+  return <Dashboard />;
 }
 
 export default App;
