@@ -16,6 +16,8 @@ interface AppState {
   generationTime: number;
   tokensPerSecond: number;
 
+  selectedGpu: number;
+
   setModel: (value: string) => void;
   setTemperature: (value: number) => void;
   setTopP: (value: number) => void;
@@ -32,6 +34,8 @@ interface AppState {
     tokens: number,
     generationTime: number
   ) => void;
+
+  setSelectedGpu:(id:number)=>void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -49,6 +53,8 @@ export const useAppStore = create<AppState>((set) => ({
   tokens: 0,
   generationTime: 0,
   tokensPerSecond: 0,
+  
+  selectedGpu:0,
 
   setModel: (model) => set({ model }),
   setTemperature: (temperature) => set({ temperature }),
@@ -78,6 +84,11 @@ export const useAppStore = create<AppState>((set) => ({
             ).toFixed(2)
           )
           : 0,
+    }),
+
+    setSelectedGpu:(id)=>
+    set({
+        selectedGpu:id
     }),
 
 }));
