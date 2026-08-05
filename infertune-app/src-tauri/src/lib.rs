@@ -1,6 +1,7 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 use serde::{Deserialize, Serialize};
 
+use std::process::Command;
 use std::sync::Mutex;
 use sysinfo::System;
 
@@ -30,6 +31,7 @@ struct GpuStats {
     id: u32,
     name: String,
     vendor: String,
+    backend: String,
     usage: u32,
     memory_used: u64,
     memory_total: u64,
@@ -37,8 +39,24 @@ struct GpuStats {
 }
 
 #[derive(Serialize)]
-struct GpuInfoList {
-    gpus: Vec<GpuStats>,
+struct GpuRecommendation {
+    recommended_gpu: u32,
+    gpu_name: String,
+    vendor: String,
+    backend: String,
+    vram_total: u64,
+    vram_used: u64,
+    score: u32,
+    reason: String,
+}
+
+#[derive(Serialize)]
+struct ModelRecommendation {
+    recommended_model: String,
+    category: String,
+    size_gb: f32,
+    reason: String,
+    score: u32,
 }
 
 #[derive(Serialize)]
@@ -77,9 +95,55 @@ struct OllamaTags {
     models: Vec<OllamaModel>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct OllamaModel {
     name: String,
+    size: u64,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct ScoredModel {
+    name: String,
+    family: String,
+    purpose: String,
+    parameters: Option<f32>,
+    quantization: Option<String>,
+    size_gb: f32,
+    estimated_vram_gb: f32,
+    estimated_ram_gb: f32,
+    score: u32,
+    breakdown: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct ModelRanking {
+    name: String,
+    family: String,
+    purpose: String,
+    size_gb: f32,
+    score: u32,
+    reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedModel {
+    name: String,
+    family: String,
+    purpose: String,
+    parameters: Option<f32>,
+    quantization: Option<String>,
+    size_gb: f32,
+    estimated_vram_gb: f32,
+    estimated_ram_gb: f32,
+}
+
+#[derive(Debug, Clone)]
+pub enum TaskType {
+    Chat,
+    Coding,
+    Reasoning,
+    Fast,
+    General,
 }
 
 fn detect_gpu_vendor(name: &str) -> String {
@@ -94,6 +158,122 @@ fn detect_gpu_vendor(name: &str) -> String {
     } else {
         "Unknown".to_string()
     }
+}
+
+fn detect_gpu_backend(vendor: &str) -> String {
+    match vendor {
+        "NVIDIA" => "NVML".to_string(),
+
+        "AMD" => "ROCm".to_string(),
+
+        "Intel" => "Intel GPU API".to_string(),
+
+        _ => "Unknown".to_string(),
+    }
+}
+
+fn get_amd_gpu_stats(name: String) -> Option<GpuStats> {
+    let output = Command::new("rocm-smi")
+        .args([
+            "--showuse",
+            "--showmeminfo",
+            "vram",
+            "--showtemp",
+            "--showproductname",
+        ])
+        .output()
+        .ok()?;
+
+    let text = String::from_utf8_lossy(&output.stdout);
+
+    let mut usage = 0;
+    let mut temperature = 0;
+    let mut memory_used = 0;
+    let mut memory_total = 0;
+
+    for line in text.lines() {
+        if line.contains("GPU use") {
+            if let Some(value) = line.split_whitespace().find(|x| x.parse::<u32>().is_ok()) {
+                usage = value.parse().unwrap_or(0);
+            }
+        }
+
+        if line.contains("Temperature") {
+            if let Some(value) = line.split_whitespace().find(|x| x.parse::<u32>().is_ok()) {
+                temperature = value.parse().unwrap_or(0);
+            }
+        }
+
+        if line.contains("Total Memory") {
+            if let Some(value) = line.split_whitespace().find(|x| x.parse::<u64>().is_ok()) {
+                memory_total = value.parse().unwrap_or(0) * 1024 * 1024;
+            }
+        }
+
+        if line.contains("Used Memory") {
+            if let Some(value) = line.split_whitespace().find(|x| x.parse::<u64>().is_ok()) {
+                memory_used = value.parse().unwrap_or(0) * 1024 * 1024;
+            }
+        }
+    }
+
+    Some(GpuStats {
+        id: 0,
+
+        name,
+
+        vendor: "AMD".to_string(),
+
+        backend: "ROCm".to_string(),
+
+        usage,
+
+        memory_used,
+
+        memory_total,
+
+        temperature,
+    })
+}
+
+fn get_intel_gpu_stats(name: String) -> Option<GpuStats> {
+    let output = Command::new("powershell")
+        .args([
+            "-Command",
+            "Get-Counter '\\GPU Engine(*)\\Utilization Percentage' | Select -Expand CounterSamples | Select -Expand CookedValue"
+        ])
+        .output()
+        .ok()?;
+
+    let text = String::from_utf8_lossy(&output.stdout);
+
+    let mut usage = 0;
+
+    for line in text.lines() {
+        if let Ok(value) = line.trim().parse::<f32>() {
+            if value > usage as f32 {
+                usage = value as u32;
+            }
+        }
+    }
+
+    Some(GpuStats {
+        id: 0,
+
+        name,
+
+        vendor: "Intel".to_string(),
+
+        backend: "Windows GPU Counter".to_string(),
+
+        usage,
+
+        memory_used: 0,
+
+        memory_total: 0,
+
+        temperature: 0,
+    })
 }
 
 fn get_gpu_info_internal() -> GpuInfo {
@@ -181,6 +361,23 @@ fn get_all_gpus() -> Vec<GpuStats> {
 
             let vendor = detect_gpu_vendor(&name);
 
+            let backend = detect_gpu_backend(&vendor);
+
+            let mut memory_used = 0;
+            let mut memory_total = 0;
+
+            if vendor == "NVIDIA" {
+                if let Ok(nvml) = Nvml::init() {
+                    if let Ok(device) = nvml.device_by_index(index) {
+                        if let Ok(memory) = device.memory_info() {
+                            memory_used = memory.used;
+
+                            memory_total = memory.total;
+                        }
+                    }
+                }
+            }
+
             gpus.push(GpuStats {
                 id: index,
 
@@ -188,11 +385,13 @@ fn get_all_gpus() -> Vec<GpuStats> {
 
                 vendor,
 
+                backend,
+
                 usage: 0,
 
-                memory_used: 0,
+                memory_used,
 
-                memory_total: 0,
+                memory_total,
 
                 temperature: 0,
             });
@@ -202,6 +401,218 @@ fn get_all_gpus() -> Vec<GpuStats> {
     }
 
     gpus
+}
+
+#[tauri::command]
+fn recommend_gpu() -> GpuRecommendation {
+    let gpus = get_all_gpus();
+
+    if gpus.is_empty() {
+        return GpuRecommendation {
+            recommended_gpu: 0,
+
+            gpu_name: "No GPU".to_string(),
+
+            vendor: "Unknown".to_string(),
+
+            backend: "Unknown".to_string(),
+
+            vram_total: 0,
+
+            vram_used: 0,
+
+            score: 0,
+
+            reason: "No GPU detected".to_string(),
+        };
+    }
+
+    let mut best_score = 0;
+
+    let mut best_gpu = &gpus[0];
+
+    for gpu in &gpus {
+        let mut score = 0;
+
+        // Vendor + backend support
+
+        match gpu.vendor.as_str() {
+            "NVIDIA" => {
+                score += 40;
+            }
+
+            "AMD" => {
+                score += 35;
+            }
+
+            "Intel" => {
+                score += 20;
+            }
+
+            _ => {}
+        }
+
+        match gpu.backend.as_str() {
+            "NVML" => {
+                score += 10;
+            }
+
+            "ROCm" => {
+                score += 10;
+            }
+
+            "Intel GPU API" => {
+                score += 5;
+            }
+
+            _ => {}
+        }
+
+        // VRAM scoring
+
+        let vram_gb = gpu.memory_total / 1024 / 1024 / 1024;
+
+        if vram_gb >= 16 {
+            score += 30;
+        } else if vram_gb >= 8 {
+            score += 25;
+        } else if vram_gb >= 6 {
+            score += 15;
+        } else if vram_gb > 0 {
+            score += 5;
+        }
+
+        // GPU detected and usable
+
+        if gpu.name != "GPU Not Detected" {
+            score += 10;
+        }
+
+        if score > best_score {
+            best_score = score;
+
+            best_gpu = gpu;
+        }
+    }
+
+    GpuRecommendation {
+        recommended_gpu: best_gpu.id,
+
+        gpu_name: best_gpu.name.clone(),
+
+        vendor: best_gpu.vendor.clone(),
+
+        backend: best_gpu.backend.clone(),
+
+        vram_total: best_gpu.memory_total,
+
+        vram_used: best_gpu.memory_used,
+
+        score: best_score,
+
+        reason: format!(
+            "Selected {} because it provides the best LLM acceleration support",
+            best_gpu.name
+        ),
+    }
+}
+
+#[tauri::command]
+async fn recommend_model(
+    ram_total: u64,
+    gpu_memory: u64,
+    vendor: String,
+    task: String,
+) -> ModelRecommendation {
+    let ram_gb = ram_total as f32 / 1024.0 / 1024.0 / 1024.0;
+    let vram_gb = gpu_memory as f32 / 1024.0 / 1024.0 / 1024.0;
+
+    let task_type = match task.to_lowercase().as_str() {
+        "coding" => TaskType::Coding,
+        "chat" => TaskType::Chat,
+        "reasoning" => TaskType::Reasoning,
+        "fast" => TaskType::Fast,
+        _ => TaskType::General,
+    };
+
+    // Get installed Ollama models
+    let installed = match get_installed_models().await {
+        Ok(models) => models,
+        Err(_) => {
+            return ModelRecommendation {
+                recommended_model: "None".to_string(),
+                category: "Unavailable".to_string(),
+                size_gb: 0.0,
+                reason: "Unable to retrieve installed models".to_string(),
+                score: 0,
+            };
+        }
+    };
+
+    // Parse and score every model
+    let mut scored: Vec<ScoredModel> = installed
+        .iter()
+        .map(parse_model)
+        .map(|m| score_model(&m, ram_gb, vram_gb, &vendor, &task_type))
+        .collect();
+
+    // No models installed
+    if scored.is_empty() {
+        return ModelRecommendation {
+            recommended_model: "None".to_string(),
+            category: "Unavailable".to_string(),
+            size_gb: 0.0,
+            reason: "No installed models found".to_string(),
+            score: 0,
+        };
+    }
+
+    // Highest score first
+    scored.sort_by(|a, b| b.score.cmp(&a.score));
+
+    let best = &scored[0];
+
+    // Determine category
+    let category = match best.parameters {
+        Some(p) if p >= 30.0 => "Very Large",
+        Some(p) if p >= 13.0 => "Large",
+        Some(p) if p >= 7.0 => "Balanced",
+        Some(p) if p >= 3.0 => "Lightweight",
+        Some(_) => "Small",
+        None => {
+            if best.size_gb >= 15.0 {
+                "Large"
+            } else if best.size_gb >= 8.0 {
+                "Balanced"
+            } else {
+                "Lightweight"
+            }
+        }
+    };
+
+    ModelRecommendation {
+        recommended_model: best.name.clone(),
+        category: category.to_string(),
+        size_gb: best.size_gb,
+        reason: best.breakdown.join("\n"),
+        score: best.score,
+    }
+}
+
+fn family_bonus(family: &str) -> u32 {
+    match family {
+        "gemma" => 5,
+
+        "qwen" => 5,
+
+        "llama" => 5,
+
+        "mistral" => 5,
+
+        "phi" => 6,
+
+        _ => 3,
+    }
 }
 
 #[tauri::command]
@@ -224,10 +635,12 @@ fn get_system_stats(state: tauri::State<AppState>) -> SystemStats {
 }
 
 fn empty_gpu_stats(name: String, vendor: String) -> GpuStats {
+    let backend = detect_gpu_backend(&vendor);
     GpuStats {
         id: 0,
         name,
         vendor,
+        backend,
         usage: 0,
         memory_used: 0,
         memory_total: 0,
@@ -239,12 +652,16 @@ fn empty_gpu_stats(name: String, vendor: String) -> GpuStats {
 fn get_gpu_stats(id: u32) -> Result<GpuStats, String> {
     let gpu_info = get_gpu_info_internal();
 
-    let detected_name = gpu_info.name.clone();
-
     let detected_vendor = gpu_info.vendor.clone();
 
-    if detected_vendor != "NVIDIA" {
-        return Ok(empty_gpu_stats(detected_name, detected_vendor));
+    if detected_vendor == "AMD" {
+        return Ok(get_amd_gpu_stats(gpu_info.name.clone())
+            .unwrap_or_else(|| empty_gpu_stats(gpu_info.name.clone(), detected_vendor.clone())));
+    }
+
+    if detected_vendor == "Intel" {
+        return Ok(get_intel_gpu_stats(gpu_info.name.clone())
+            .unwrap_or_else(|| empty_gpu_stats(gpu_info.name.clone(), detected_vendor.clone())));
     }
 
     let nvml = match Nvml::init() {
@@ -257,6 +674,8 @@ fn get_gpu_stats(id: u32) -> Result<GpuStats, String> {
                 name: "GPU Not Supported".to_string(),
 
                 vendor: "Unknown".to_string(),
+
+                backend: "Unknown".to_string(),
 
                 usage: 0,
 
@@ -279,6 +698,8 @@ fn get_gpu_stats(id: u32) -> Result<GpuStats, String> {
                 name: "GPU Not Detected".to_string(),
 
                 vendor: "Unknown".to_string(),
+
+                backend: "Unknown".to_string(),
 
                 usage: 0,
 
@@ -305,6 +726,7 @@ fn get_gpu_stats(id: u32) -> Result<GpuStats, String> {
                 id: 0,
                 name,
                 vendor: vendor.clone(),
+                backend: detect_gpu_backend(&vendor),
                 usage: 0,
                 memory_used: 0,
                 memory_total: 0,
@@ -321,6 +743,7 @@ fn get_gpu_stats(id: u32) -> Result<GpuStats, String> {
                 id: 0,
                 name,
                 vendor: vendor.clone(),
+                backend: detect_gpu_backend(&vendor),
                 usage: utilization.gpu,
                 memory_used: 0,
                 memory_total: 0,
@@ -334,11 +757,13 @@ fn get_gpu_stats(id: u32) -> Result<GpuStats, String> {
         .unwrap_or(0);
 
     Ok(GpuStats {
-        id: 0,
+        id,
 
         name,
 
-        vendor,
+        vendor: vendor.clone(),
+
+        backend: detect_gpu_backend(&vendor),
 
         usage: utilization.gpu,
 
@@ -359,6 +784,433 @@ async fn get_models() -> Vec<String> {
     let data: OllamaTags = response.json().await.expect("Invalid Ollama response");
 
     data.models.into_iter().map(|m| m.name).collect()
+}
+
+async fn get_installed_models() -> Result<Vec<OllamaModel>, String> {
+    let response = reqwest::get("http://localhost:11434/api/tags")
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let data: OllamaTags = response.json().await.map_err(|e| e.to_string())?;
+
+    Ok(data.models)
+}
+
+fn detect_family(name: &str) -> String {
+    let lower = name.to_lowercase();
+
+    let families = [
+        "llama",
+        "qwen",
+        "gemma",
+        "mistral",
+        "phi",
+        "deepseek",
+        "hermes",
+        "command-r",
+        "codestral",
+        "mixtral",
+        "yi",
+        "falcon",
+        "granite",
+        "internlm",
+        "starcoder",
+        "wizardlm",
+    ];
+
+    for family in families {
+        if lower.contains(family) {
+            return family.to_string();
+        }
+    }
+
+    "unknown".to_string()
+}
+
+fn detect_parameters(name: &str) -> Option<f32> {
+    let lower = name.to_lowercase();
+
+    for part in lower.split([':', '-', '_']) {
+        if part.ends_with('b') {
+            let value = part.trim_end_matches('b');
+
+            // Skip formats like 8x7b
+            if value.contains('x') {
+                continue;
+            }
+
+            if let Ok(num) = value.parse::<f32>() {
+                return Some(num);
+            }
+        }
+    }
+
+    None
+}
+
+fn detect_quantization(name: &str) -> Option<String> {
+    let lower = name.to_lowercase();
+
+    let known_quantizations = [
+        "iq2_xxs", "iq2_xs", "iq3_xxs", "iq3_xs", "iq4_xs", "iq4_nl", "q2_k", "q3_k_s", "q3_k_m",
+        "q3_k_l", "q4_0", "q4_1", "q4_k_s", "q4_k_m", "q5_0", "q5_1", "q5_k_s", "q5_k_m", "q6_k",
+        "q8_0", "f16", "f32",
+    ];
+
+    for quant in known_quantizations {
+        if lower.contains(quant) {
+            return Some(quant.to_string());
+        }
+    }
+
+    None
+}
+
+fn quantization_bonus(quant: Option<&str>) -> u32 {
+    match quant {
+        Some("iq2_xxs") => 10,
+        Some("iq2_xs") => 10,
+        Some("iq3_xxs") => 9,
+        Some("iq3_xs") => 9,
+        Some("iq4_xs") => 8,
+        Some("iq4_nl") => 8,
+        Some("q2_k") => 9,
+        Some("q3_k_s") => 8,
+        Some("q3_k_m") => 8,
+        Some("q3_k_l") => 7,
+        Some("q4_0") => 7,
+        Some("q4_1") => 7,
+        Some("q4_k_s") => 8,
+        Some("q4_k_m") => 9,
+        Some("q5_0") => 6,
+        Some("q5_1") => 6,
+        Some("q5_k_s") => 7,
+        Some("q5_k_m") => 7,
+        Some("q6_k") => 5,
+        Some("q8_0") => 3,
+        Some("f16") => 1,
+        Some("f32") => 0,
+        _ => 0,
+    }
+}
+
+fn estimate_memory(params: Option<f32>, quant: Option<&str>, size_gb: f32) -> (f32, f32) {
+    let parameters = match params {
+        Some(p) => p,
+
+        None => {
+            // Estimate parameters from Ollama model size
+            // Assume Q4 quantization average
+
+            let estimated_params = size_gb / 0.65;
+
+            estimated_params
+        }
+    };
+
+    // Bytes per parameter estimation
+    let bytes_per_param = match quant {
+        // 2-bit
+        Some("iq2_xxs") | Some("iq2_xs") => 0.25,
+
+        // 3-bit
+        Some("iq3_xxs") | Some("iq3_xs") => 0.375,
+
+        // 4-bit
+        Some("q4_0") | Some("q4_1") | Some("q4_k_s") | Some("q4_k_m") | Some("iq4_xs")
+        | Some("iq4_nl") => 0.5,
+
+        // 5-bit
+        Some("q5_0") | Some("q5_1") | Some("q5_k_s") | Some("q5_k_m") => 0.625,
+
+        // 6-bit
+        Some("q6_k") => 0.75,
+
+        // 8-bit
+        Some("q8_0") => 1.0,
+
+        // Full precision
+        Some("f16") => 2.0,
+
+        Some("f32") => 4.0,
+
+        // Unknown
+        _ => 0.5,
+    };
+
+    // Model weights memory
+    let weight_memory = parameters * bytes_per_param;
+
+    // Add runtime overhead
+    let vram_estimate = weight_memory * 1.15;
+
+    // CPU RAM needs more overhead
+    let ram_estimate = weight_memory * 1.4;
+
+    (vram_estimate, ram_estimate)
+}
+
+fn parse_model(model: &OllamaModel) -> ParsedModel {
+    let lower = model.name.to_lowercase();
+
+    let family = detect_family(&model.name);
+
+    let parameters = detect_parameters(&model.name);
+
+    let quantization = detect_quantization(&model.name);
+
+    let size_gb = model.size as f32 / 1024.0 / 1024.0 / 1024.0;
+
+    let (estimated_vram_gb, estimated_ram_gb) =
+        estimate_memory(parameters, quantization.as_deref(), size_gb);
+
+    let purpose = if lower.contains("coder") || lower.contains("code") {
+        "Coding"
+    } else if lower.contains("vision") || lower.contains("vl") {
+        "Vision"
+    } else if lower.contains("embed") {
+        "Embedding"
+    } else if lower.contains("reason") {
+        "Reasoning"
+    } else {
+        "Chat"
+    };
+
+    ParsedModel {
+        name: model.name.clone(),
+        family,
+        purpose: purpose.to_string(),
+        parameters,
+        quantization,
+        size_gb: model.size as f32 / 1024.0 / 1024.0 / 1024.0,
+        estimated_vram_gb,
+        estimated_ram_gb,
+    }
+}
+
+fn calculate_task_score(model: &str, task: &TaskType) -> i32 {
+    let model_name = model.to_lowercase();
+
+    match task {
+        TaskType::Coding => {
+            if model_name.contains("coder")
+                || model_name.contains("code")
+                || model_name.contains("qwen")
+            {
+                30
+            } else {
+                5
+            }
+        }
+
+        TaskType::Chat => {
+            if model_name.contains("llama")
+                || model_name.contains("hermes")
+                || model_name.contains("mistral")
+            {
+                25
+            } else {
+                10
+            }
+        }
+
+        TaskType::Reasoning => {
+            if model_name.contains("qwen") || model_name.contains("deepseek") {
+                30
+            } else {
+                10
+            }
+        }
+
+        TaskType::Fast => {
+            if model_name.contains("mini")
+                || model_name.contains("small")
+                || model_name.contains("phi")
+            {
+                25
+            } else {
+                5
+            }
+        }
+
+        TaskType::General => 10,
+    }
+}
+
+#[tauri::command]
+async fn get_model_rankings(
+    ram_total: u64,
+    gpu_memory: u64,
+    vendor: String,
+    task: String,
+) -> Vec<ModelRanking> {
+    let ram_gb = ram_total as f32 / 1024.0 / 1024.0 / 1024.0;
+
+    let vram_gb = gpu_memory as f32 / 1024.0 / 1024.0 / 1024.0;
+
+    let task_type = match task.to_lowercase().as_str() {
+        "coding" => TaskType::Coding,
+        "chat" => TaskType::Chat,
+        "reasoning" => TaskType::Reasoning,
+        "fast" => TaskType::Fast,
+        _ => TaskType::General,
+    };
+
+    let installed = match get_installed_models().await {
+        Ok(models) => models,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut scored: Vec<ScoredModel> = installed
+        .iter()
+        .map(parse_model)
+        .map(|m| score_model(&m, ram_gb, vram_gb, &vendor, &task_type))
+        .collect();
+
+    scored.sort_by(|a, b| b.score.cmp(&a.score));
+
+    scored
+        .into_iter()
+        .map(|m| ModelRanking {
+            name: m.name,
+            family: m.family,
+            purpose: m.purpose,
+            size_gb: m.size_gb,
+            score: m.score,
+            reasons: m.breakdown,
+        })
+        .collect()
+}
+
+fn score_model(
+    model: &ParsedModel,
+    ram_gb: f32,
+    vram_gb: f32,
+    vendor: &str,
+    task: &TaskType,
+) -> ScoredModel {
+    let mut score: u32 = 0;
+    let mut breakdown: Vec<String> = Vec::new();
+    let task_bonus = calculate_task_score(&model.name, task) as u32;
+
+    score += task_bonus;
+
+    if task_bonus > 0 {
+        breakdown.push(format!("Task preference bonus +{}", task_bonus));
+    }
+
+    // VRAM compatibility
+    if model.estimated_vram_gb <= vram_gb * 0.9 {
+        score += 40;
+
+        breakdown.push(format!(
+            "GPU memory fit ({:.1}GB required) +40",
+            model.estimated_vram_gb
+        ));
+
+        if model.estimated_vram_gb <= vram_gb * 0.7 {
+            score += 10;
+
+            breakdown.push("Good GPU headroom +10".to_string());
+        }
+    } else if model.estimated_vram_gb <= vram_gb {
+        score += 25;
+
+        breakdown.push(format!(
+            "Tight GPU fit ({:.1}GB required) +25",
+            model.estimated_vram_gb
+        ));
+    } else if model.estimated_ram_gb <= ram_gb {
+        score += 10;
+
+        breakdown.push(format!(
+            "Runs in system RAM ({:.1}GB required) +10",
+            model.estimated_ram_gb
+        ));
+    } else {
+        breakdown.push("Memory requirement too high +0".to_string());
+    }
+    if ram_gb >= model.estimated_ram_gb {
+        score += 10;
+
+        breakdown.push("System RAM available +10".to_string());
+    }
+
+    // Vendor
+    if vendor.to_lowercase().contains("nvidia") {
+        score += 10;
+    }
+
+    let family_score = family_bonus(&model.family);
+    score += family_score;
+
+    breakdown.push(format!("Model family ({}) +{}", model.family, family_score));
+
+    // Parameter count
+    match model.parameters {
+        Some(p) if p <= 3.0 => {
+            score += 10;
+            breakdown.push("Small model size +10".to_string());
+        }
+
+        Some(p) if p <= 7.0 => {
+            score += 8;
+            breakdown.push("Medium model size +8".to_string());
+        }
+
+        Some(p) if p <= 13.0 => {
+            score += 6;
+            breakdown.push("Large model size +6".to_string());
+        }
+
+        Some(_) => {
+            score += 3;
+            breakdown.push("Very large model size +3".to_string());
+        }
+
+        None => {}
+    }
+
+    let quant_score = quantization_bonus(model.quantization.as_deref());
+    score += quant_score;
+
+    if quant_score > 0 {
+        breakdown.push(format!(
+            "Quantization ({}) +{}",
+            model.quantization.as_deref().unwrap(),
+            quant_score
+        ));
+    }
+
+    // VRAM Headroom
+    let usage = model.estimated_vram_gb / vram_gb;
+
+    if usage <= 0.5 {
+        score += 15;
+
+        breakdown.push("Large VRAM headroom +15".to_string());
+    } else if usage <= 0.75 {
+        score += 10;
+
+        breakdown.push("Good VRAM headroom +10".to_string());
+    } else if usage <= 1.0 {
+        score += 5;
+
+        breakdown.push("Tight VRAM usage +5".to_string());
+    }
+
+    ScoredModel {
+        name: model.name.clone(),
+        family: model.family.clone(),
+        purpose: model.purpose.clone(),
+        parameters: model.parameters,
+        quantization: model.quantization.clone(),
+        size_gb: model.size_gb,
+        estimated_vram_gb: model.estimated_vram_gb,
+        estimated_ram_gb: model.estimated_ram_gb,
+        score,
+        breakdown,
+    }
 }
 
 #[tauri::command]
@@ -451,7 +1303,10 @@ pub fn run() {
             get_gpu_stats,
             check_ollama_status,
             get_gpu_info,
-            get_all_gpus
+            get_all_gpus,
+            recommend_gpu,
+            recommend_model,
+            get_model_rankings
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,7 +1,7 @@
 import { Cpu, MemoryStick, Monitor, Thermometer } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useState } from "react";
-
+import { useEffect } from "react";
+import { useAppStore } from "../store/useAppStore";
 
 interface SystemStats {
     cpu_usage: number;
@@ -13,6 +13,7 @@ interface SystemStats {
 interface GpuStats {
     name: string;
     vendor: string;
+    backend: string;
     usage: number;
     memory_used: number;
     memory_total: number;
@@ -22,21 +23,13 @@ interface GpuStats {
 
 export default function HardwareMonitor() {
 
-    const [stats, setStats] = useState<SystemStats>({
-        cpu_usage: 0,
-        ram_used: 0,
-        ram_total: 0,
-    });
-
-
-    const [gpu, setGpu] = useState<GpuStats>({
-        name: "Unknown",
-        vendor: "Unknown",
-        usage: 0,
-        memory_used: 0,
-        memory_total: 0,
-        temperature: 0,
-    });
+    const {
+        hardware,
+        gpuStats,
+        setHardware,
+        setGpuStats,
+        selectedGpu
+    } = useAppStore();
 
 
     useEffect(() => {
@@ -53,12 +46,15 @@ export default function HardwareMonitor() {
 
                 const graphics =
                     await invoke<GpuStats>(
-                        "get_gpu_stats"
+                        "get_gpu_stats",
+                        {
+                            id: selectedGpu
+                        }
                     );
 
 
-                setStats(system);
-                setGpu(graphics);
+                setHardware(system);
+                setGpuStats(graphics);
 
 
             } catch (error) {
@@ -84,33 +80,28 @@ export default function HardwareMonitor() {
             clearInterval(interval);
 
 
-    }, []);
+    }, [selectedGpu]);
 
 
     const ramGB =
-        (stats.ram_used / 1024 / 1024 / 1024)
+        (hardware.ram_used / 1024 / 1024 / 1024)
             .toFixed(1);
 
 
     const totalRamGB =
-        (stats.ram_total / 1024 / 1024 / 1024)
+        (hardware.ram_total / 1024 / 1024 / 1024)
             .toFixed(1);
 
 
     return (
 
-        <div className="rounded-xl bg-gray-900 border border-gray-800 p-4 space-y-4">
-
-            <h3 className="font-semibold text-lg">
-                Hardware Monitor
-            </h3>
-
+        <div className="space-y-4">
 
             <div className="flex items-center gap-3">
                 <Cpu size={18} />
 
                 <span>
-                    CPU {stats.cpu_usage.toFixed(1)}%
+                    CPU {hardware.cpu_usage.toFixed(1)}%
                 </span>
             </div>
 
@@ -131,7 +122,7 @@ export default function HardwareMonitor() {
                     <Monitor size={18} />
 
                     <span>
-                        {gpu.name.replace(
+                        {gpuStats.name.replace(
                             "NVIDIA GeForce ",
                             ""
                         )}
@@ -141,23 +132,27 @@ export default function HardwareMonitor() {
 
 
                 <p className="text-sm text-gray-400 mt-2">
-                    GPU Load: {gpu.usage}%
+                    GPU Load: {gpuStats.usage}%
+                </p>
+
+                <p className="text-sm text-gray-400">
+                    Backend: {gpuStats.backend}
                 </p>
 
 
                 <p className="text-sm text-gray-400">
                     VRAM:
                     {" "}
-                    {(gpu.memory_used / 1024 / 1024 / 1024).toFixed(1)}
+                    {(gpuStats.memory_used / 1024 / 1024 / 1024).toFixed(1)}
                     /
-                    {(gpu.memory_total / 1024 / 1024 / 1024).toFixed(1)}
+                    {(gpuStats.memory_total / 1024 / 1024 / 1024).toFixed(1)}
                     GB
                 </p>
 
 
                 <p className="text-sm text-gray-400 flex items-center gap-2">
                     <Thermometer size={16} />
-                    {gpu.temperature}°C
+                    {gpuStats.temperature}°C
                 </p>
 
 

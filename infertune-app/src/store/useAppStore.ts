@@ -1,5 +1,30 @@
 import { create } from "zustand";
 
+interface HardwareStats {
+  cpu_usage: number;
+  ram_used: number;
+  ram_total: number;
+}
+
+interface GpuStats {
+  name: string;
+  vendor: string;
+  usage: number;
+  backend: string;
+  memory_used: number;
+  memory_total: number;
+  temperature: number;
+}
+
+interface ModelRanking {
+  name: string;
+  family: string;
+  purpose: string;
+  size_gb: number;
+  score: number;
+  reasons: string[];
+}
+
 interface AppState {
   model: string;
   temperature: number;
@@ -17,6 +42,8 @@ interface AppState {
   tokensPerSecond: number;
 
   selectedGpu: number;
+  selectedGpuName: string;
+  selectedGpuVendor: string;
 
   setModel: (value: string) => void;
   setTemperature: (value: number) => void;
@@ -35,7 +62,30 @@ interface AppState {
     generationTime: number
   ) => void;
 
-  setSelectedGpu:(id:number)=>void;
+  setSelectedGpu: (id: number) => void;
+
+  setSelectedGpuInfo: (
+    name: string,
+    vendor: string
+  ) => void;
+
+  hardware: HardwareStats;
+
+  gpuStats: GpuStats;
+
+  setHardware: (
+    stats: HardwareStats
+  ) => void;
+
+  setGpuStats: (
+    stats: GpuStats
+  ) => void;
+
+  rankings: ModelRanking[];
+
+  setRankings: (
+    models: ModelRanking[]
+  ) => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -53,8 +103,29 @@ export const useAppStore = create<AppState>((set) => ({
   tokens: 0,
   generationTime: 0,
   tokensPerSecond: 0,
-  
-  selectedGpu:0,
+
+  selectedGpu: 0,
+
+  selectedGpuName: "",
+  selectedGpuVendor: "",
+
+  hardware: {
+    cpu_usage: 0,
+    ram_used: 0,
+    ram_total: 0,
+  },
+
+  gpuStats: {
+    name: "Unknown",
+    vendor: "Unknown",
+    backend: "Unknown",
+    usage: 0,
+    memory_used: 0,
+    memory_total: 0,
+    temperature: 0,
+  },
+
+  rankings: [],
 
   setModel: (model) => set({ model }),
   setTemperature: (temperature) => set({ temperature }),
@@ -86,9 +157,31 @@ export const useAppStore = create<AppState>((set) => ({
           : 0,
     }),
 
-    setSelectedGpu:(id)=>
+  setSelectedGpu: (id) =>
     set({
-        selectedGpu:id
+      selectedGpu: id
+    }),
+
+  setSelectedGpuInfo: (name, vendor) =>
+    set({
+      selectedGpuName: name,
+      selectedGpuVendor: vendor
+    }),
+
+  setHardware: (stats) =>
+    set({
+      hardware: stats
+    }),
+
+
+  setGpuStats: (stats) =>
+    set({
+      gpuStats: stats
+    }),
+
+  setRankings: (models) =>
+    set({
+      rankings: models
     }),
 
 }));

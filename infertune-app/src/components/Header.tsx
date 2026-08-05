@@ -4,68 +4,21 @@ import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
 
 
-interface SystemStats {
-  cpu_usage: number;
-  ram_used: number;
-  ram_total: number;
-}
-
-interface GpuStats {
-  name: string;
-  vendor: string;
-  usage: number;
-  memory_used: number;
-  memory_total: number;
-  temperature: number;
-}
-
 export default function Header() {
 
   const {
     model,
-    selectedGpu
+    hardware,
+    gpuStats
   } = useAppStore();
 
   const [ollamaOnline, setOllamaOnline] = useState(false);
-
-  const [stats, setStats] = useState<SystemStats>({
-    cpu_usage: 0,
-    ram_used: 0,
-    ram_total: 0,
-  });
-
-  const [gpu, setGpu] = useState<GpuStats>({
-    name: "Unknown",
-    vendor: "Unknown",
-    usage: 0,
-    memory_used: 0,
-    memory_total: 0,
-    temperature: 0,
-  });
-
 
   useEffect(() => {
 
     const updateStats = async () => {
 
       try {
-
-        const data = await invoke<SystemStats>(
-          "get_system_stats"
-        );
-
-        setStats(data);
-
-
-        const gpuData = await invoke<GpuStats>(
-          "get_gpu_stats",
-          {
-            id: selectedGpu
-          }
-        );
-
-        setGpu(gpuData);
-
 
         const ollamaStatus = await invoke<boolean>(
           "check_ollama_status"
@@ -89,18 +42,18 @@ export default function Header() {
 
     const interval = setInterval(
       updateStats,
-      3000
+      2000
     );
 
 
     return () => clearInterval(interval);
 
-  }, [selectedGpu]);
+  }, []);
 
 
   const ramPercentage =
-    stats.ram_total > 0
-      ? ((stats.ram_used / stats.ram_total) * 100).toFixed(1)
+    hardware.ram_total > 0
+      ? ((hardware.ram_used / hardware.ram_total) * 100).toFixed(1)
       : "0";
 
 
@@ -123,7 +76,7 @@ export default function Header() {
         <div className="flex items-center gap-2">
           <Cpu size={18} />
           <span>
-            CPU {stats.cpu_usage.toFixed(1)}%
+            CPU {hardware.cpu_usage.toFixed(1)}%
           </span>
         </div>
 
@@ -141,11 +94,15 @@ export default function Header() {
           <Monitor size={18} />
 
           <span>
-            GPU {gpu.usage}%
+            GPU {gpuStats.usage}%
           </span>
 
           <span className="text-gray-500">
-            {gpu.temperature}°C
+            {gpuStats.temperature}°C
+          </span>
+
+          <span className="text-gray-500">
+            {gpuStats.backend}
           </span>
         </div>
 
