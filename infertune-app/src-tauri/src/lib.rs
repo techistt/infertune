@@ -1460,3 +1460,93 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() < 0.01
+    }
+
+    #[test]
+    fn bytes_per_param_covers_common_quantizations() {
+        assert!(close(bytes_per_param(Some("q4_k_m")), 0.58));
+        assert!(close(bytes_per_param(Some("q8_0")), 1.06));
+        assert!(close(bytes_per_param(Some("f16")), 2.0));
+        assert!(close(bytes_per_param(Some("f32")), 4.0));
+        // Unknown or missing quantization falls back to a typical 4-bit size.
+        assert!(close(bytes_per_param(None), 0.58));
+        assert!(close(bytes_per_param(Some("mystery")), 0.58));
+    }
+
+    #[test]
+    fn memory_uses_real_file_size_and_kv_cache() {
+        // 4 GB of weights, 128 KiB of KV cache per token, 8192 tokens = 1 GB.
+        let (vram, ram) = estimate_memory(Some(7.0), Some("q4_k_m"), 4.0, Some(131_072.0), 8192);
+
+        assert!(close(vram, 5.5), "vram was {vram}");
+        assert!(close(ram, 6.0), "ram was {ram}");
+    }
+
+    #[test]
+    fn memory_estimates_weights_when_size_is_unknown() {
+        // 7B at ~0.58 bytes/param = 4.06 GB, plus fallback KV and 0.5 GB overhead.
+        let (vram, _) = estimate_memory(Some(7.0), Some("q4_k_m"), 0.0, None, 4096);
+
+        assert!(close(vram, 4.06 + 0.4375 + 0.5), "vram was {vram}");
+    }
+
+    #[test]
+    fn memory_grows_with_context() {
+        let small = estimate_memory(Some(8.0), None, 4.7, None, 4096).0;
+        let large = estimate_memory(Some(8.0), None, 4.7, None, 32768).0;
+
+        assert!(large > small + 2.0);
+    }
+
+    #[test]
+    fn cpu_needs_more_overhead_than_gpu() {
+        let (vram, ram) = estimate_memory(None, None, 3.0, Some(100_000.0), 4096);
+
+        assert!(ram > vram);
+    }
+
+    #[test]
+    fn detects_gpu_vendor_and_backend() {
+        assert_eq!(detect_gpu_vendor("NVIDIA GeForce RTX 3050"), "NVIDIA");
+        assert_eq!(detect_gpu_vendor("AMD Radeon RX 7800"), "AMD");
+        assert_eq!(detect_gpu_vendor("Intel(R) UHD Graphics"), "Intel");
+        assert_eq!(detect_gpu_vendor("Microsoft Basic Render"), "Unknown");
+
+        assert_eq!(detect_gpu_backend("NVIDIA"), "NVML");
+        assert_eq!(detect_gpu_backend("AMD"), "ROCm");
+        assert_eq!(detect_gpu_backend("Other"), "Unknown");
+    }
+
+    #[test]
+    fn parses_model_names() {
+        assert_eq!(detect_family("Qwen2.5:7b"), "qwen");
+        assert_eq!(detect_family("gemma4:e4b"), "gemma");
+        assert_eq!(detect_family("something-else"), "unknown");
+
+        assert_eq!(detect_parameters("llama3.2:3b"), Some(3.0));
+        assert_eq!(detect_parameters("qwen2.5:7b-instruct-q4_K_M"), Some(7.0));
+        // Mixture-of-experts names like 8x7b are not a plain parameter count.
+        assert_eq!(detect_parameters("mixtral:8x7b"), None);
+        assert_eq!(detect_parameters("gemma4:e4b"), None);
+
+        assert_eq!(
+            detect_quantization("qwen2.5:7b-instruct-Q4_K_M").as_deref(),
+            Some("q4_k_m")
+        );
+        assert_eq!(detect_quantization("llama3.2:3b"), None);
+    }
+
+    #[test]
+    fn smaller_quantizations_score_higher_than_large_ones() {
+        assert!(quantization_bonus(Some("q4_k_m")) > quantization_bonus(Some("q8_0")));
+        assert!(quantization_bonus(Some("q8_0")) > quantization_bonus(Some("f32")));
+        assert_eq!(quantization_bonus(None), 0);
+    }
+}

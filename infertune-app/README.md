@@ -31,9 +31,12 @@ switch between them at any time.
 
 - **Dashboard:** live CPU, RAM, GPU and VRAM (NVIDIA via NVML, AMD via `rocm-smi`, Intel via Windows GPU counters), multi-GPU selection, GPU and model recommendations with a score breakdown.
 - **Playground:** chat with temperature, top-p, top-k, max tokens, seed and context length (capped to the model's real limit). Shows token count and tokens/second. Ctrl+Enter to send.
+- **GPU memory guard:** before you run a model, InferTune compares its estimated memory need at your chosen context with the VRAM that is actually free. It warns when loading may crash the server, explains when part of the model will run on the CPU, and suggests the largest context length that still fits fully on your GPU.
+- **Friendly errors:** common failures (GPU out of memory, server crash, model not found, server unreachable, timeouts, bad API key) come with a plain-language tip next to the raw error.
 - **Models:** every installed model with parameters, quantization, size, estimated VRAM and RAM at your context length, and a fit rating (GPU / partial offload / CPU / too large). Ollama users can download and remove models, with live progress.
-- **Benchmarks:** run one or more models through a preset or custom prompt for several runs with fixed settings. Records tokens/second, time, and peak CPU / RAM / GPU / VRAM. Results are saved and can be copied as CSV.
-- **Sessions:** every Playground generation is saved. Search, review the full settings and response, reopen in the Playground, copy as JSON or delete.
+- **Compare:** send one prompt to 2–4 models and read the answers side by side, with speed and time for each. Models run one at a time so they do not fight over GPU memory.
+- **Benchmarks:** run one or more models through a preset or custom prompt for several runs with fixed settings. Records tokens/second, time, and peak CPU / RAM / GPU / VRAM. Shows a speed chart, and results can be copied as Markdown (for forums and docs) or CSV.
+- **Sessions:** every Playground and Compare generation is saved. Search, review the full settings and response, reopen in the Playground, copy as JSON or delete.
 - **Logs:** in-app log of connections, errors, downloads and benchmarks, with level filter, search and copy.
 - **Settings:** manage servers, API keys, refresh interval, and stored data.
 
@@ -47,7 +50,7 @@ servers, load models in that server's own app and press Refresh.
 
 ## Requirements
 
-- Windows 10/11 (uses DXGI and WebView2; the installer fetches WebView2 if missing)
+- Windows 10/11 (uses DXGI and WebView2; the installer fetches WebView2 if missing). Linux and macOS are not supported yet: GPU detection is Windows-specific.
 - At least one supported local server running with a model available
 - Optional: an NVIDIA driver (for NVML), or ROCm's `rocm-smi` for AMD
 
@@ -61,6 +64,18 @@ npm install
 npm run tauri dev
 ```
 
+## Testing
+
+```bash
+npm test                                          # frontend unit tests (Vitest)
+cargo test --lib --manifest-path src-tauri/Cargo.toml   # Rust unit tests
+npx tsc --noEmit                                  # type-check
+```
+
+The tests cover the memory estimator (Rust and TypeScript), context-length
+suggestions, GPU-memory advice, error hints, exports, server presets and the
+settings, history and log stores. They also run on every push in GitHub Actions.
+
 ## Build an installer
 
 ```bash
@@ -70,13 +85,23 @@ npm run tauri build
 The installer is written to `src-tauri/target/release/bundle/nsis/`. The
 portable executable is `src-tauri/target/release/infertune-app.exe`.
 
+If the build stops at `Downloading ...nsis-3.11.zip` (or fails with
+`timeout: global`), your network is blocking the download of the NSIS
+installer tool. Build only the executable instead, which skips that step:
+
+```bash
+npm run build:exe
+```
+
+The installer can still be built by the GitHub Actions workflow (push a `v*` tag).
+
 ## Releasing
 
 1. Bump the version in `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`.
-2. Commit, then tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
+2. Commit, then tag and push: `git tag v0.3.0 && git push origin v0.3.0`.
 3. The **Build InferTune** workflow builds the Windows installer and attaches it to a draft GitHub release.
 
-Installers are unsigned. Windows SmartScreen will warn on first run until the
+The release workflow runs the type-check and both test suites first. Installers are unsigned. Windows SmartScreen will warn on first run until the
 installer is code-signed.
 
 ## Privacy

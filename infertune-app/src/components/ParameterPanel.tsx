@@ -6,6 +6,7 @@ import { useActiveProfile } from "../store/settingsStore";
 import { toConfig } from "../types/provider";
 import { logger, errorMessage } from "../store/logStore";
 import ContextSelect from "./ContextSelect";
+import { useModelMemory } from "../hooks/useModelMemory";
 
 export default function ParameterPanel() {
   const [models, setModels] = useState<string[]>([]);
@@ -14,6 +15,7 @@ export default function ParameterPanel() {
   const [contextLimit, setContextLimit] = useState<number | null>(null);
 
   const profile = useActiveProfile();
+  const gpuTotal = useAppStore((s) => s.gpuStats.memory_total);
 
   const {
     model,
@@ -32,6 +34,8 @@ export default function ParameterPanel() {
     setSeed,
     setContextLength,
   } = useAppStore();
+
+  const { suggested } = useModelMemory(model);
 
   const loadModels = useCallback(async () => {
     setLoading(true);
@@ -226,6 +230,29 @@ export default function ParameterPanel() {
             {!profile.kind.startsWith("ollama") &&
               " This server fixes its context size when it starts, so this only affects estimates."}
           </p>
+
+          {gpuTotal > 0 && model && (
+            <p className="text-xs mt-2 text-gray-300">
+              {suggested !== null ? (
+                suggested === contextLength ? (
+                  <>Best fit for your GPU: {suggested.toLocaleString()} tokens.</>
+                ) : (
+                  <>
+                    Largest context that fits your GPU:{" "}
+                    {suggested.toLocaleString()} tokens.{" "}
+                    <button
+                      onClick={() => setContextLength(suggested)}
+                      className="text-blue-400 hover:underline"
+                    >
+                      Use it
+                    </button>
+                  </>
+                )
+              ) : (
+                <>This model does not fully fit your GPU at any size, so part of it will run on the CPU.</>
+              )}
+            </p>
+          )}
         </div>
 
         <div>

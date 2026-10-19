@@ -6,6 +6,7 @@ export type Page =
   | "playground"
   | "models"
   | "benchmarks"
+  | "compare"
   | "sessions"
   | "logs"
   | "settings";

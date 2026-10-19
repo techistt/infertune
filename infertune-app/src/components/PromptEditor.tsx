@@ -118,7 +118,7 @@ export default function PromptEditor() {
 
       <div className="space-y-5">
 
-        <VramWarning />
+        <VramWarning model={model} />
 
         <div>
           <label className="block mb-2 font-medium">

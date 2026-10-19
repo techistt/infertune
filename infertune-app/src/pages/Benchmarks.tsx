@@ -26,6 +26,8 @@ import {
 import ContextSelect from "../components/ContextSelect";
 import Bar from "../components/Bar";
 import VramWarning from "../components/VramWarning";
+import SpeedChart from "../components/SpeedChart";
+import { buildCsv, buildMarkdown } from "../utils/export";
 import { withHint } from "../utils/hints";
 
 const PROMPTS = [
@@ -93,51 +95,6 @@ function average(values: number[]): number {
     : 0;
 }
 
-function csvCell(value: string | number): string {
-  const text = String(value);
-  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
-}
-
-function buildCsv(results: BenchmarkResult[]): string {
-  const header = [
-    "Date",
-    "Server",
-    "Model",
-    "Prompt",
-    "Context",
-    "Runs",
-    "Avg tok/s",
-    "Avg time ms",
-    "Avg tokens",
-    "Peak CPU %",
-    "Peak RAM GB",
-    "Peak GPU %",
-    "Peak VRAM GB",
-  ];
-
-  const lines = results.map((r) =>
-    [
-      new Date(r.createdAt).toISOString(),
-      r.providerName,
-      r.model,
-      r.promptName,
-      r.contextLength,
-      r.runs.length,
-      r.avgTokensPerSecond.toFixed(2),
-      Math.round(r.avgTimeMs),
-      Math.round(r.avgTokens),
-      r.peakCpu.toFixed(0),
-      r.peakRamGb.toFixed(1),
-      r.peakGpu.toFixed(0),
-      r.peakVramGb.toFixed(1),
-    ]
-      .map(csvCell)
-      .join(",")
-  );
-
-  return [header.join(","), ...lines].join("\n");
-}
-
 export default function Benchmarks() {
   const profile = useActiveProfile();
 
@@ -161,7 +118,7 @@ export default function Benchmarks() {
   const [step, setStep] = useState({ done: 0, total: 0 });
   const [error, setError] = useState<string | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<"" | "csv" | "md">("");
 
   const cancelRef = useRef(false);
 
@@ -312,11 +269,13 @@ export default function Benchmarks() {
     logger.info("benchmark", cancelRef.current ? "Stopped by user" : "Finished");
   };
 
-  const copyCsv = async () => {
+  const copyAs = async (kind: "csv" | "md") => {
     try {
-      await navigator.clipboard.writeText(buildCsv(results));
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
+      await navigator.clipboard.writeText(
+        kind === "csv" ? buildCsv(results) : buildMarkdown(results)
+      );
+      setCopied(kind);
+      setTimeout(() => setCopied(""), 1500);
     } catch {
       // Clipboard unavailable.
     }
@@ -342,7 +301,7 @@ export default function Benchmarks() {
         </p>
 
         <div className="mt-4">
-          <VramWarning />
+          <VramWarning model={selected[0] ?? ""} context={contextLength} />
         </div>
 
         <div className="mt-5 grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -492,10 +451,17 @@ export default function Benchmarks() {
           {results.length > 0 && (
             <div className="flex items-center gap-2">
               <button
-                onClick={copyCsv}
+                onClick={() => copyAs("md")}
                 className="rounded-lg bg-gray-700 px-3 py-2 hover:bg-gray-600"
               >
-                {copied ? "Copied" : "Copy as CSV"}
+                {copied === "md" ? "Copied" : "Copy as Markdown"}
+              </button>
+
+              <button
+                onClick={() => copyAs("csv")}
+                className="rounded-lg bg-gray-700 px-3 py-2 hover:bg-gray-600"
+              >
+                {copied === "csv" ? "Copied" : "Copy as CSV"}
               </button>
 
               {confirmClear ? (
@@ -527,6 +493,12 @@ export default function Benchmarks() {
             </div>
           )}
         </div>
+
+        {results.length > 0 && (
+          <div className="mt-5">
+            <SpeedChart results={results} />
+          </div>
+        )}
 
         <div className="mt-4 overflow-x-auto">
           {results.length > 0 ? (

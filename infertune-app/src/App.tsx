@@ -4,6 +4,7 @@ import Dashboard from "./pages/Dashboard";
 import Playground from "./pages/Playground";
 import Models from "./pages/Models";
 import Benchmarks from "./pages/Benchmarks";
+import Compare from "./pages/Compare";
 import Sessions from "./pages/Sessions";
 import Logs from "./pages/Logs";
 import Settings from "./pages/Settings";
@@ -30,6 +31,7 @@ function App() {
           {page === "playground" && <Playground />}
           {page === "models" && <Models />}
           {page === "benchmarks" && <Benchmarks />}
+          {page === "compare" && <Compare />}
           {page === "sessions" && <Sessions />}
           {page === "logs" && <Logs />}
           {page === "settings" && <Settings />}

@@ -7,6 +7,7 @@ const TITLES: Record<Page, string> = {
   playground: "Playground",
   models: "Models",
   benchmarks: "Benchmarks",
+  compare: "Compare",
   sessions: "Sessions",
   logs: "Logs",
   settings: "Settings",
