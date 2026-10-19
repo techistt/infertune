@@ -1,13 +1,65 @@
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 use serde::{Deserialize, Serialize};
 
 use std::process::Command;
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use sysinfo::System;
 
 use nvml_wrapper::Nvml;
 
-use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
+use std::os::windows::process::CommandExt;
+use windows::Win32::Graphics::Dxgi::{
+    CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_DESC1, DXGI_ADAPTER_FLAG_SOFTWARE,
+};
+
+/// Prevents a console window from flashing when spawning helper processes.
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// DXGI descriptions are fixed-size, NUL-padded UTF-16 buffers.
+fn adapter_name(desc: &DXGI_ADAPTER_DESC1) -> String {
+    let end = desc
+        .Description
+        .iter()
+        .position(|&c| c == 0)
+        .unwrap_or(desc.Description.len());
+    String::from_utf16_lossy(&desc.Description[..end])
+}
+
+fn is_software_adapter(desc: &DXGI_ADAPTER_DESC1) -> bool {
+    (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0
+}
+
+/// Prefer the PCI vendor id; fall back to the name.
+fn vendor_from_desc(desc: &DXGI_ADAPTER_DESC1, name: &str) -> String {
+    match desc.VendorId {
+        0x10DE => "NVIDIA".to_string(),
+        0x1002 | 0x1022 => "AMD".to_string(),
+        0x8086 => "Intel".to_string(),
+        _ => detect_gpu_vendor(name),
+    }
+}
+
+/// Finds the NVML device that matches a DXGI adapter name.
+/// DXGI and NVML enumerate in different orders, so indexes cannot be shared.
+fn find_nvml_device<'a>(nvml: &'a Nvml, name: &str) -> Option<nvml_wrapper::Device<'a>> {
+    let count = nvml.device_count().ok()?;
+    let mut first = None;
+
+    for i in 0..count {
+        if let Ok(device) = nvml.device_by_index(i) {
+            if let Ok(nvml_name) = device.name() {
+                if nvml_name.trim().eq_ignore_ascii_case(name.trim()) {
+                    return Some(device);
+                }
+            }
+            if first.is_none() {
+                first = Some(device);
+            }
+        }
+    }
+
+    first
+}
 
 #[derive(Serialize)]
 struct SystemStats {
@@ -24,6 +76,9 @@ struct AppState {
 struct GpuInfo {
     name: String,
     vendor: String,
+    /// (high, low) parts of the adapter LUID; used to match Windows perf counters.
+    #[serde(skip_serializing)]
+    luid: (u32, u32),
 }
 
 #[derive(Serialize)]
@@ -74,6 +129,7 @@ struct OllamaOptions {
     top_k: u32,
     seed: u32,
     num_predict: u32,
+    num_ctx: u32,
 }
 
 #[derive(Deserialize)]
@@ -174,6 +230,7 @@ fn detect_gpu_backend(vendor: &str) -> String {
 
 fn get_amd_gpu_stats(name: String) -> Option<GpuStats> {
     let output = Command::new("rocm-smi")
+        .creation_flags(CREATE_NO_WINDOW)
         .args([
             "--showuse",
             "--showmeminfo",
@@ -236,92 +293,111 @@ fn get_amd_gpu_stats(name: String) -> Option<GpuStats> {
     })
 }
 
-fn get_intel_gpu_stats(name: String) -> Option<GpuStats> {
+fn get_intel_gpu_stats(name: String, luid: (u32, u32)) -> Option<GpuStats> {
     let output = Command::new("powershell")
+        .creation_flags(CREATE_NO_WINDOW)
         .args([
+            "-NoProfile",
             "-Command",
-            "Get-Counter '\\GPU Engine(*)\\Utilization Percentage' | Select -Expand CounterSamples | Select -Expand CookedValue"
+            "Get-Counter '\\GPU Engine(*)\\Utilization Percentage' | Select -Expand CounterSamples | ForEach-Object { \"$($_.Path)|$($_.CookedValue)\" }",
         ])
         .output()
         .ok()?;
 
     let text = String::from_utf8_lossy(&output.stdout);
 
-    let mut usage = 0;
+    // Counter instances look like: pid_123_luid_0x00000000_0x0000abcd_phys_0_eng_0_engtype_3d
+    let wanted = format!("luid_0x{:08x}_0x{:08x}", luid.0, luid.1);
+
+    // Like Task Manager: sum load per engine type across processes,
+    // then report the busiest engine type.
+    let mut per_engine: HashMap<String, f32> = HashMap::new();
 
     for line in text.lines() {
-        if let Ok(value) = line.trim().parse::<f32>() {
-            if value > usage as f32 {
-                usage = value as u32;
-            }
+        let Some((path, value)) = line.rsplit_once('|') else {
+            continue;
+        };
+
+        let path = path.to_lowercase();
+
+        if !path.contains(&wanted) {
+            continue;
         }
+
+        let Ok(value) = value.trim().replace(',', ".").parse::<f32>() else {
+            continue;
+        };
+
+        let engine = path
+            .split("engtype_")
+            .nth(1)
+            .and_then(|rest| rest.split(')').next())
+            .unwrap_or("unknown")
+            .to_string();
+
+        *per_engine.entry(engine).or_insert(0.0) += value;
     }
+
+    let usage = per_engine
+        .values()
+        .cloned()
+        .fold(0.0_f32, f32::max)
+        .min(100.0) as u32;
 
     Some(GpuStats {
         id: 0,
-
         name,
-
         vendor: "Intel".to_string(),
-
         backend: "Windows GPU Counter".to_string(),
-
         usage,
-
         memory_used: 0,
-
         memory_total: 0,
-
         temperature: 0,
     })
 }
 
 fn get_gpu_info_internal() -> GpuInfo {
-    unsafe {
-        let factory = match CreateDXGIFactory1::<IDXGIFactory1>() {
-            Ok(factory) => factory,
+    get_gpu_info_at(0).unwrap_or(GpuInfo {
+        name: "No GPU Found".to_string(),
+        vendor: "Unknown".to_string(),
+        luid: (0, 0),
+    })
+}
 
-            Err(_) => {
-                return GpuInfo {
-                    name: "GPU Detection Failed".to_string(),
-                    vendor: "Unknown".to_string(),
-                };
-            }
-        };
+/// Returns the GPU at position `id` in the list produced by `get_all_gpus`
+/// (software adapters excluded), so ids stay consistent across commands.
+fn get_gpu_info_at(id: u32) -> Option<GpuInfo> {
+    let mut position = 0;
+
+    unsafe {
+        let factory = CreateDXGIFactory1::<IDXGIFactory1>().ok()?;
 
         let mut index = 0;
 
-        loop {
-            let adapter = factory.EnumAdapters1(index);
-
-            if adapter.is_err() {
-                break;
-            }
-
-            let adapter = adapter.unwrap();
+        while let Ok(adapter) = factory.EnumAdapters1(index) {
+            index += 1;
 
             let desc = match adapter.GetDesc1() {
                 Ok(desc) => desc,
-
-                Err(_) => {
-                    index += 1;
-                    continue;
-                }
+                Err(_) => continue,
             };
 
-            let name = String::from_utf16_lossy(&desc.Description);
+            if is_software_adapter(&desc) {
+                continue;
+            }
 
-            let vendor = detect_gpu_vendor(&name);
+            if position == id {
+                let name = adapter_name(&desc);
+                let vendor = vendor_from_desc(&desc, &name);
+                let luid = (desc.AdapterLuid.HighPart as u32, desc.AdapterLuid.LowPart);
+                return Some(GpuInfo { name, vendor, luid });
+            }
 
-            return GpuInfo { name, vendor };
+            position += 1;
         }
     }
 
-    GpuInfo {
-        name: "No GPU Found".to_string(),
-
-        vendor: "Unknown".to_string(),
-    }
+    None
 }
 
 #[tauri::command]
@@ -331,72 +407,58 @@ fn get_all_gpus() -> Vec<GpuStats> {
     unsafe {
         let factory = match CreateDXGIFactory1::<IDXGIFactory1>() {
             Ok(factory) => factory,
-
-            Err(_) => {
-                return gpus;
-            }
+            Err(_) => return gpus,
         };
 
+        let nvml = Nvml::init().ok();
+
         let mut index = 0;
+        let mut id = 0;
 
-        loop {
-            let adapter = factory.EnumAdapters1(index);
-
-            if adapter.is_err() {
-                break;
-            }
-
-            let adapter = adapter.unwrap();
+        while let Ok(adapter) = factory.EnumAdapters1(index) {
+            index += 1;
 
             let desc = match adapter.GetDesc1() {
                 Ok(desc) => desc,
-
-                Err(_) => {
-                    index += 1;
-                    continue;
-                }
+                Err(_) => continue,
             };
 
-            let name = String::from_utf16_lossy(&desc.Description);
+            if is_software_adapter(&desc) {
+                continue;
+            }
 
-            let vendor = detect_gpu_vendor(&name);
-
+            let name = adapter_name(&desc);
+            let vendor = vendor_from_desc(&desc, &name);
             let backend = detect_gpu_backend(&vendor);
 
             let mut memory_used = 0;
             let mut memory_total = 0;
 
             if vendor == "NVIDIA" {
-                if let Ok(nvml) = Nvml::init() {
-                    if let Ok(device) = nvml.device_by_index(index) {
+                if let Some(nvml) = nvml.as_ref() {
+                    if let Some(device) = find_nvml_device(nvml, &name) {
                         if let Ok(memory) = device.memory_info() {
                             memory_used = memory.used;
-
                             memory_total = memory.total;
                         }
                     }
                 }
+            } else if desc.DedicatedVideoMemory > 0 {
+                memory_total = desc.DedicatedVideoMemory as u64;
             }
 
             gpus.push(GpuStats {
-                id: index,
-
+                id,
                 name,
-
                 vendor,
-
                 backend,
-
                 usage: 0,
-
                 memory_used,
-
                 memory_total,
-
                 temperature: 0,
             });
 
-            index += 1;
+            id += 1;
         }
     }
 
@@ -523,6 +585,7 @@ async fn recommend_model(
     gpu_memory: u64,
     vendor: String,
     task: String,
+    context: Option<u64>,
 ) -> ModelRecommendation {
     let ram_gb = ram_total as f32 / 1024.0 / 1024.0 / 1024.0;
     let vram_gb = gpu_memory as f32 / 1024.0 / 1024.0 / 1024.0;
@@ -550,11 +613,7 @@ async fn recommend_model(
     };
 
     // Parse and score every model
-    let mut scored: Vec<ScoredModel> = installed
-        .iter()
-        .map(parse_model)
-        .map(|m| score_model(&m, ram_gb, vram_gb, &vendor, &task_type))
-        .collect();
+    let mut scored = score_installed(&installed, ram_gb, vram_gb, &vendor, &task_type, context.unwrap_or(DEFAULT_CONTEXT)).await;
 
     // No models installed
     if scored.is_empty() {
@@ -599,6 +658,25 @@ async fn recommend_model(
     }
 }
 
+async fn score_installed(
+    installed: &[OllamaModel],
+    ram_gb: f32,
+    vram_gb: f32,
+    vendor: &str,
+    task: &TaskType,
+    context: u64,
+) -> Vec<ScoredModel> {
+    let mut scored = Vec::with_capacity(installed.len());
+
+    for model in installed {
+        let meta = fetch_model_meta(&model.name).await;
+        let parsed = parse_model(model, meta, context);
+        scored.push(score_model(&parsed, ram_gb, vram_gb, vendor, task));
+    }
+
+    scored
+}
+
 fn family_bonus(family: &str) -> u32 {
     match family {
         "gemma" => 5,
@@ -615,6 +693,12 @@ fn family_bonus(family: &str) -> u32 {
     }
 }
 
+/// Largest context length the model supports (None if unknown / Ollama down).
+#[tauri::command]
+async fn get_model_context_limit(model: String) -> Option<u64> {
+    fetch_model_meta(&model).await?.max_context
+}
+
 #[tauri::command]
 fn get_gpu_info() -> GpuInfo {
     get_gpu_info_internal()
@@ -622,7 +706,7 @@ fn get_gpu_info() -> GpuInfo {
 
 #[tauri::command]
 fn get_system_stats(state: tauri::State<AppState>) -> SystemStats {
-    let mut system = state.system.lock().unwrap();
+    let mut system = state.system.lock().unwrap_or_else(|e| e.into_inner());
 
     system.refresh_cpu_usage();
     system.refresh_memory();
@@ -648,142 +732,82 @@ fn empty_gpu_stats(name: String, vendor: String) -> GpuStats {
     }
 }
 
-#[tauri::command]
-fn get_gpu_stats(id: u32) -> Result<GpuStats, String> {
-    let gpu_info = get_gpu_info_internal();
-
-    let detected_vendor = gpu_info.vendor.clone();
-
-    if detected_vendor == "AMD" {
-        return Ok(get_amd_gpu_stats(gpu_info.name.clone())
-            .unwrap_or_else(|| empty_gpu_stats(gpu_info.name.clone(), detected_vendor.clone())));
-    }
-
-    if detected_vendor == "Intel" {
-        return Ok(get_intel_gpu_stats(gpu_info.name.clone())
-            .unwrap_or_else(|| empty_gpu_stats(gpu_info.name.clone(), detected_vendor.clone())));
-    }
-
-    let nvml = match Nvml::init() {
-        Ok(nvml) => nvml,
-
-        Err(_) => {
-            return Ok(GpuStats {
-                id: 0,
-
-                name: "GPU Not Supported".to_string(),
-
-                vendor: "Unknown".to_string(),
-
-                backend: "Unknown".to_string(),
-
-                usage: 0,
-
-                memory_used: 0,
-
-                memory_total: 0,
-
-                temperature: 0,
-            });
-        }
-    };
-
-    let gpu = match nvml.device_by_index(id) {
-        Ok(device) => device,
-
-        Err(_) => {
-            return Ok(GpuStats {
-                id: 0,
-
+fn collect_gpu_stats(id: u32) -> GpuStats {
+    let info = match get_gpu_info_at(id) {
+        Some(info) => info,
+        None => {
+            return GpuStats {
+                id,
                 name: "GPU Not Detected".to_string(),
-
                 vendor: "Unknown".to_string(),
-
                 backend: "Unknown".to_string(),
-
-                usage: 0,
-
-                memory_used: 0,
-
-                memory_total: 0,
-
-                temperature: 0,
-            });
-        }
-    };
-
-    let gpu_info = get_gpu_info_internal();
-
-    let name = gpu_info.name;
-
-    let vendor = gpu_info.vendor;
-
-    let utilization = match gpu.utilization_rates() {
-        Ok(value) => value,
-
-        Err(_) => {
-            return Ok(GpuStats {
-                id: 0,
-                name,
-                vendor: vendor.clone(),
-                backend: detect_gpu_backend(&vendor),
                 usage: 0,
                 memory_used: 0,
                 memory_total: 0,
                 temperature: 0,
-            });
+            };
         }
     };
 
-    let memory = match gpu.memory_info() {
-        Ok(value) => value,
+    let mut stats = match info.vendor.as_str() {
+        "AMD" => get_amd_gpu_stats(info.name.clone())
+            .unwrap_or_else(|| empty_gpu_stats(info.name.clone(), info.vendor.clone())),
 
-        Err(_) => {
-            return Ok(GpuStats {
-                id: 0,
-                name,
-                vendor: vendor.clone(),
-                backend: detect_gpu_backend(&vendor),
-                usage: utilization.gpu,
-                memory_used: 0,
-                memory_total: 0,
-                temperature: 0,
-            });
-        }
+        "Intel" => get_intel_gpu_stats(info.name.clone(), info.luid)
+            .unwrap_or_else(|| empty_gpu_stats(info.name.clone(), info.vendor.clone())),
+
+        "NVIDIA" => nvidia_gpu_stats(&info.name).unwrap_or_else(|| {
+            empty_gpu_stats(info.name.clone(), info.vendor.clone())
+        }),
+
+        _ => empty_gpu_stats(info.name.clone(), info.vendor.clone()),
     };
 
-    let temperature = gpu
+    stats.id = id;
+    stats
+}
+
+fn nvidia_gpu_stats(name: &str) -> Option<GpuStats> {
+    let nvml = Nvml::init().ok()?;
+    let device = find_nvml_device(&nvml, name)?;
+
+    let usage = device.utilization_rates().map(|u| u.gpu).unwrap_or(0);
+
+    let (memory_used, memory_total) = device
+        .memory_info()
+        .map(|m| (m.used, m.total))
+        .unwrap_or((0, 0));
+
+    let temperature = device
         .temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu)
         .unwrap_or(0);
 
-    Ok(GpuStats {
-        id,
-
-        name,
-
-        vendor: vendor.clone(),
-
-        backend: detect_gpu_backend(&vendor),
-
-        usage: utilization.gpu,
-
-        memory_used: memory.used,
-
-        memory_total: memory.total,
-
+    Some(GpuStats {
+        id: 0,
+        name: name.to_string(),
+        vendor: "NVIDIA".to_string(),
+        backend: detect_gpu_backend("NVIDIA"),
+        usage,
+        memory_used,
+        memory_total,
         temperature,
     })
 }
 
+// Async + spawn_blocking so slow probes (powershell, rocm-smi) never block the UI thread.
+#[tauri::command]
+async fn get_gpu_stats(id: u32) -> Result<GpuStats, String> {
+    tauri::async_runtime::spawn_blocking(move || collect_gpu_stats(id))
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn get_models() -> Vec<String> {
-    let response = reqwest::get("http://localhost:11434/api/tags")
-        .await
-        .expect("Failed to connect to Ollama");
-
-    let data: OllamaTags = response.json().await.expect("Invalid Ollama response");
-
-    data.models.into_iter().map(|m| m.name).collect()
+    match get_installed_models().await {
+        Ok(models) => models.into_iter().map(|m| m.name).collect(),
+        Err(_) => Vec::new(),
+    }
 }
 
 async fn get_installed_models() -> Result<Vec<OllamaModel>, String> {
@@ -894,75 +918,140 @@ fn quantization_bonus(quant: Option<&str>) -> u32 {
     }
 }
 
-fn estimate_memory(params: Option<f32>, quant: Option<&str>, size_gb: f32) -> (f32, f32) {
-    let parameters = match params {
-        Some(p) => p,
+/// Context length used when the UI does not specify one (Ollama's default).
+const DEFAULT_CONTEXT: u64 = 4096;
 
+/// Extra metadata read from Ollama's `/api/show`.
+#[derive(Debug, Clone, Default)]
+struct ModelMeta {
+    parameters_b: Option<f32>,
+    quantization: Option<String>,
+    /// f16 KV cache cost per token, in bytes.
+    kv_bytes_per_token: Option<f64>,
+    /// Largest context the model supports.
+    max_context: Option<u64>,
+}
+
+fn json_u64(value: &serde_json::Value) -> Option<u64> {
+    match value {
+        serde_json::Value::Array(items) => items.iter().filter_map(|v| v.as_u64()).max(),
+        other => other.as_u64(),
+    }
+}
+
+static META_CACHE: OnceLock<Mutex<HashMap<String, ModelMeta>>> = OnceLock::new();
+
+/// Cached wrapper: model metadata never changes, so ask Ollama once per model.
+async fn fetch_model_meta(name: &str) -> Option<ModelMeta> {
+    let cache = META_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    if let Some(meta) = cache.lock().ok()?.get(name) {
+        return Some(meta.clone());
+    }
+
+    let meta = fetch_model_meta_uncached(name).await?;
+
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(name.to_string(), meta.clone());
+    }
+
+    Some(meta)
+}
+
+async fn fetch_model_meta_uncached(name: &str) -> Option<ModelMeta> {
+    let response = reqwest::Client::new()
+        .post("http://localhost:11434/api/show")
+        .json(&serde_json::json!({ "model": name, "name": name }))
+        .send()
+        .await
+        .ok()?;
+
+    let data: serde_json::Value = response.json().await.ok()?;
+
+    let parameters_b = data["details"]["parameter_size"]
+        .as_str()
+        .and_then(|p| p.trim().trim_end_matches(['B', 'b']).parse::<f32>().ok());
+
+    let quantization = data["details"]["quantization_level"]
+        .as_str()
+        .map(|q| q.to_lowercase());
+
+    let info = &data["model_info"];
+    let arch = info["general.architecture"].as_str()?;
+
+    let layers = json_u64(&info[format!("{arch}.block_count")]);
+    let heads = json_u64(&info[format!("{arch}.attention.head_count")]);
+    let kv_heads = json_u64(&info[format!("{arch}.attention.head_count_kv")]).or(heads);
+    let embedding = json_u64(&info[format!("{arch}.embedding_length")]);
+
+    let kv_bytes_per_token = match (layers, heads, kv_heads, embedding) {
+        (Some(l), Some(h), Some(kv), Some(e)) if h > 0 => {
+            // 2 (K and V) * layers * kv_heads * head_dim * 2 bytes (f16)
+            Some(2.0 * l as f64 * kv as f64 * (e as f64 / h as f64) * 2.0)
+        }
+        _ => None,
+    };
+
+    let max_context = json_u64(&info[format!("{arch}.context_length")]);
+
+    Some(ModelMeta {
+        parameters_b,
+        quantization,
+        kv_bytes_per_token,
+        max_context,
+    })
+}
+
+/// Returns (estimated VRAM GB, estimated RAM GB) for running the model at
+/// `context` tokens: weights + KV cache + runtime buffers.
+fn estimate_memory(
+    params: Option<f32>,
+    size_gb: f32,
+    kv_bytes_per_token: Option<f64>,
+    context: u64,
+) -> (f32, f32) {
+    // The file Ollama downloaded *is* the weights, so use its real size.
+    let weights_gb = size_gb;
+
+    let kv_gb = match kv_bytes_per_token {
+        Some(bytes) => (bytes * context as f64 / 1024.0 / 1024.0 / 1024.0) as f32,
         None => {
-            // Estimate parameters from Ollama model size
-            // Assume Q4 quantization average
-
-            let estimated_params = size_gb / 0.65;
-
-            estimated_params
+            // Rough fallback: ~0.5 GB of KV cache per 4k context for an 8B model.
+            let p = params.unwrap_or(size_gb / 0.6);
+            0.5 * (p / 8.0).max(0.1) * (context as f32 / 4096.0)
         }
     };
 
-    // Bytes per parameter estimation
-    let bytes_per_param = match quant {
-        // 2-bit
-        Some("iq2_xxs") | Some("iq2_xs") => 0.25,
+    // GPU: compute buffers + CUDA context. CPU: allocator overhead is larger.
+    let vram = weights_gb + kv_gb + 0.5;
+    let ram = weights_gb + kv_gb + 1.0;
 
-        // 3-bit
-        Some("iq3_xxs") | Some("iq3_xs") => 0.375,
-
-        // 4-bit
-        Some("q4_0") | Some("q4_1") | Some("q4_k_s") | Some("q4_k_m") | Some("iq4_xs")
-        | Some("iq4_nl") => 0.5,
-
-        // 5-bit
-        Some("q5_0") | Some("q5_1") | Some("q5_k_s") | Some("q5_k_m") => 0.625,
-
-        // 6-bit
-        Some("q6_k") => 0.75,
-
-        // 8-bit
-        Some("q8_0") => 1.0,
-
-        // Full precision
-        Some("f16") => 2.0,
-
-        Some("f32") => 4.0,
-
-        // Unknown
-        _ => 0.5,
-    };
-
-    // Model weights memory
-    let weight_memory = parameters * bytes_per_param;
-
-    // Add runtime overhead
-    let vram_estimate = weight_memory * 1.15;
-
-    // CPU RAM needs more overhead
-    let ram_estimate = weight_memory * 1.4;
-
-    (vram_estimate, ram_estimate)
+    (vram, ram)
 }
 
-fn parse_model(model: &OllamaModel) -> ParsedModel {
+fn parse_model(model: &OllamaModel, meta: Option<ModelMeta>, context: u64) -> ParsedModel {
     let lower = model.name.to_lowercase();
 
     let family = detect_family(&model.name);
 
-    let parameters = detect_parameters(&model.name);
+    let meta = meta.unwrap_or_default();
+    let context = match meta.max_context {
+        Some(max) => context.min(max),
+        None => context,
+    };
 
-    let quantization = detect_quantization(&model.name);
+    // Prefer Ollama's own metadata; fall back to parsing the tag name.
+    let parameters = meta.parameters_b.or_else(|| detect_parameters(&model.name));
+
+    let quantization = meta
+        .quantization
+        .clone()
+        .or_else(|| detect_quantization(&model.name));
 
     let size_gb = model.size as f32 / 1024.0 / 1024.0 / 1024.0;
 
     let (estimated_vram_gb, estimated_ram_gb) =
-        estimate_memory(parameters, quantization.as_deref(), size_gb);
+        estimate_memory(parameters, size_gb, meta.kv_bytes_per_token, context);
 
     let purpose = if lower.contains("coder") || lower.contains("code") {
         "Coding"
@@ -1043,6 +1132,7 @@ async fn get_model_rankings(
     gpu_memory: u64,
     vendor: String,
     task: String,
+    context: Option<u64>,
 ) -> Vec<ModelRanking> {
     let ram_gb = ram_total as f32 / 1024.0 / 1024.0 / 1024.0;
 
@@ -1061,11 +1151,7 @@ async fn get_model_rankings(
         Err(_) => return Vec::new(),
     };
 
-    let mut scored: Vec<ScoredModel> = installed
-        .iter()
-        .map(parse_model)
-        .map(|m| score_model(&m, ram_gb, vram_gb, &vendor, &task_type))
-        .collect();
+    let mut scored = score_installed(&installed, ram_gb, vram_gb, &vendor, &task_type, context.unwrap_or(DEFAULT_CONTEXT)).await;
 
     scored.sort_by(|a, b| b.score.cmp(&a.score));
 
@@ -1119,6 +1205,14 @@ fn score_model(
         breakdown.push(format!(
             "Tight GPU fit ({:.1}GB required) +25",
             model.estimated_vram_gb
+        ));
+    } else if vram_gb > 0.0 && model.estimated_ram_gb <= ram_gb {
+        score += 15;
+
+        breakdown.push(format!(
+            "Partial GPU offload: ~{:.0}% of layers on GPU, rest in RAM ({:.1}GB needed) +15",
+            (vram_gb * 0.9 / model.estimated_vram_gb * 100.0).min(99.0),
+            model.estimated_ram_gb
         ));
     } else if model.estimated_ram_gb <= ram_gb {
         score += 10;
@@ -1183,7 +1277,11 @@ fn score_model(
     }
 
     // VRAM Headroom
-    let usage = model.estimated_vram_gb / vram_gb;
+    let usage = if vram_gb > 0.0 {
+        model.estimated_vram_gb / vram_gb
+    } else {
+        f32::MAX
+    };
 
     if usage <= 0.5 {
         score += 15;
@@ -1214,11 +1312,6 @@ fn score_model(
 }
 
 #[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
-
-#[tauri::command]
 async fn generate_text(
     model: String,
     system_prompt: String,
@@ -1228,6 +1321,7 @@ async fn generate_text(
     top_k: u32,
     max_tokens: u32,
     seed: u32,
+    context_length: Option<u32>,
 ) -> GenerateResponse {
     let prompt = format!("System:\n{}\n\nUser:\n{}", system_prompt, user_prompt);
 
@@ -1242,25 +1336,38 @@ async fn generate_text(
             top_k,
             seed,
             num_predict: max_tokens,
+            num_ctx: context_length.unwrap_or(DEFAULT_CONTEXT as u32),
         },
     };
 
     let client = reqwest::Client::new();
 
-    let response = client
+    let response = match client
         .post("http://localhost:11434/api/generate")
         .json(&request)
         .send()
         .await
-        .expect("Failed to connect to Ollama");
+    {
+        Ok(response) => response,
+        Err(e) => {
+            return GenerateResponse {
+                text: format!("Ollama Error: could not connect to Ollama ({})", e),
+                tokens: 0,
+                generation_time: 0,
+            };
+        }
+    };
 
-    let body = response
-        .text()
-        .await
-        .expect("Failed reading Ollama response");
-
-    println!("OLLAMA RAW RESPONSE:");
-    println!("{}", body);
+    let body = match response.text().await {
+        Ok(body) => body,
+        Err(e) => {
+            return GenerateResponse {
+                text: format!("Ollama Error: failed reading response ({})", e),
+                tokens: 0,
+                generation_time: 0,
+            };
+        }
+    };
 
     let result: OllamaResponse = match serde_json::from_str(&body) {
         Ok(value) => value,
@@ -1296,7 +1403,6 @@ pub fn run() {
         })
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
-            greet,
             generate_text,
             get_models,
             get_system_stats,
@@ -1306,7 +1412,8 @@ pub fn run() {
             get_all_gpus,
             recommend_gpu,
             recommend_model,
-            get_model_rankings
+            get_model_rankings,
+            get_model_context_limit
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -39,6 +39,9 @@ export default function GpuSelector() {
 
                 }
 
+            })
+            .catch((error) => {
+                console.error("Failed to list GPUs:", error);
             });
 
     }, []);

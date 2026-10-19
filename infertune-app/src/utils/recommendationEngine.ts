@@ -54,10 +54,6 @@ export function generateRecommendation(
 
 
 
-    const gpu =
-        input.gpuName.toLowerCase();
-
-
     const model =
         input.model.toLowerCase();
 

@@ -32,6 +32,7 @@ export default function PromptEditor() {
 
       maxTokens: state.maxTokens,
       seed: state.seed,
+      contextLength: state.contextLength,
     });
 
     console.log("RECEIVED FROM RUST:", result);

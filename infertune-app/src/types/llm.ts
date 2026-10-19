@@ -10,6 +10,7 @@ export interface GenerateRequest {
 
     maxTokens: number;
     seed: number;
+    contextLength: number;
 }
 
 

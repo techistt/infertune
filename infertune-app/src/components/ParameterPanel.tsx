@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { getModels } from "../services/modelService";
+import { getModels, getModelContextLimit } from "../services/modelService";
 import { useAppStore } from "../store/useAppStore";
 
 export default function ParameterPanel() {
   const [models, setModels] = useState<string[]>([]);
+  const [contextLimit, setContextLimit] = useState<number | null>(null);
   useEffect(() => {
 
     async function loadModels() {
@@ -36,6 +37,7 @@ export default function ParameterPanel() {
     topK,
     maxTokens,
     seed,
+    contextLength,
 
     setModel,
     setTemperature,
@@ -43,7 +45,37 @@ export default function ParameterPanel() {
     setTopK,
     setMaxTokens,
     setSeed,
+    setContextLength,
   } = useAppStore();
+
+  // Offer only context sizes the selected model supports.
+  useEffect(() => {
+    let cancelled = false;
+
+    getModelContextLimit(model).then((limit) => {
+      if (cancelled) return;
+
+      setContextLimit(limit);
+
+      if (limit !== null && useAppStore.getState().contextLength > limit) {
+        setContextLength(limit);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [model]);
+
+  const contextOptions = [2048, 4096, 8192, 16384, 32768, 65536, 131072].filter(
+    (n) => contextLimit === null || n <= contextLimit
+  );
+
+  // Make sure the current value is always selectable (e.g. a limit of 40960).
+  if (!contextOptions.includes(contextLength)) {
+    contextOptions.push(contextLength);
+    contextOptions.sort((a, b) => a - b);
+  }
 
   const resetValues = () => {
     setModel("hermes3:latest");
@@ -52,6 +84,7 @@ export default function ParameterPanel() {
     setTopK(40);
     setMaxTokens(1024);
     setSeed(42);
+    setContextLength(4096);
   };
 
   return (
@@ -135,6 +168,32 @@ export default function ParameterPanel() {
             onChange={(e) => setMaxTokens(Number(e.target.value))}
             className="w-full rounded-lg bg-gray-800 p-2"
           />
+        </div>
+
+        <div>
+          <div className="flex justify-between mb-2">
+            <label>Context Length</label>
+            <span>{contextLength.toLocaleString()}</span>
+          </div>
+
+          <select
+            value={contextLength}
+            onChange={(e) => setContextLength(Number(e.target.value))}
+            className="w-full rounded-lg bg-gray-800 p-2"
+          >
+            {contextOptions.map((n) => (
+              <option key={n} value={n}>
+                {n.toLocaleString()} tokens
+              </option>
+            ))}
+          </select>
+
+          <p className="text-xs text-gray-400 mt-1">
+            {contextLimit !== null
+              ? `Model supports up to ${contextLimit.toLocaleString()} tokens. `
+              : ""}
+            Larger context uses more memory (KV cache).
+          </p>
         </div>
 
         <div>

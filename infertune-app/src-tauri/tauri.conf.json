@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "infertune-app",
+  "productName": "InferTune",
   "version": "0.1.0",
   "identifier": "com.infertune.app",
   "build": {
@@ -12,24 +12,44 @@
   "app": {
     "windows": [
       {
-        "title": "infertune-app",
-        "width": 800,
-        "height": 600
+        "title": "InferTune",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1100,
+        "minHeight": 700,
+        "center": true,
+        "resizable": true
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost",
+      "devCsp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost ws://localhost:1420 http://localhost:1420"
     }
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": [
+      "nsis"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "publisher": "InferTune",
+    "category": "DeveloperTool",
+    "shortDescription": "Hardware-aware tuning studio for local LLMs",
+    "longDescription": "InferTune monitors your CPU, RAM, GPU and VRAM while running local models through Ollama, estimates what fits on your hardware, and recommends models and settings.",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "displayLanguageSelector": false
+      },
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      }
+    }
   }
 }

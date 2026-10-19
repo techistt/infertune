@@ -27,6 +27,7 @@ export async function generateText(
 
       maxTokens: request.maxTokens,
       seed: request.seed,
+      contextLength: request.contextLength,
     }
   );
 

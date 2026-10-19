@@ -32,6 +32,7 @@ interface AppState {
   topK: number;
   maxTokens: number;
   seed: number;
+  contextLength: number;
 
   systemPrompt: string;
   userPrompt: string;
@@ -51,6 +52,7 @@ interface AppState {
   setTopK: (value: number) => void;
   setMaxTokens: (value: number) => void;
   setSeed: (value: number) => void;
+  setContextLength: (value: number) => void;
 
   setSystemPrompt: (value: string) => void;
   setUserPrompt: (value: string) => void;
@@ -95,6 +97,7 @@ export const useAppStore = create<AppState>((set) => ({
   topK: 40,
   maxTokens: 1024,
   seed: 42,
+  contextLength: 4096,
 
   systemPrompt: "You are a helpful AI assistant.",
   userPrompt: "",
@@ -133,6 +136,7 @@ export const useAppStore = create<AppState>((set) => ({
   setTopK: (topK) => set({ topK }),
   setMaxTokens: (maxTokens) => set({ maxTokens }),
   setSeed: (seed) => set({ seed }),
+  setContextLength: (contextLength) => set({ contextLength }),
 
   setSystemPrompt: (systemPrompt) => set({ systemPrompt }),
   setUserPrompt: (userPrompt) => set({ userPrompt }),

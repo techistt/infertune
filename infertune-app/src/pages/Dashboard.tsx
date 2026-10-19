@@ -3,7 +3,6 @@ import Header from "../components/Header";
 import ParameterPanel from "../components/ParameterPanel";
 import PromptEditor from "../components/PromptEditor";
 import ResponsePanel from "../components/ResponsePanel";
-import HardwareMonitor from "../components/HardwareMonitor";
 import GpuSelector from "../components/GpuSelector";
 import HardwareCard from "../components/HardwareCard";
 import ModelRecommendationCard from "../components/ModelRecommendationCard";
@@ -13,10 +12,10 @@ import ModelRankingCard from "../components/ModelRankingCard";
 
 export default function Dashboard() {
   return (
-    <div className="flex min-h-screen bg-gray-950 text-white">
+    <div className="flex h-screen bg-gray-950 text-white overflow-hidden">
       <Sidebar />
 
-      <div className="flex flex-1 flex-col">
+      <div className="flex flex-1 min-w-0 flex-col">
         <Header />
 
         <main className="flex-1 p-4 overflow-y-auto">
@@ -39,17 +38,17 @@ export default function Dashboard() {
               <ResponsePanel />
             </div>
 
-            <div className="col-span-12 grid grid-cols-3 gap-5">
+            <div className="col-span-12 grid grid-cols-1 lg:grid-cols-6 gap-5">
 
-              <HardwareCard />
+              <div className="lg:col-span-2"><HardwareCard /></div>
 
-              <GpuRecommendationCard />
+              <div className="lg:col-span-2"><GpuRecommendationCard /></div>
 
-              <ModelRecommendationCard />
+              <div className="lg:col-span-2"><ModelRecommendationCard /></div>
 
-              <ModelRankingCard />
+              <div className="lg:col-span-3"><ModelRankingCard /></div>
 
-              <PerformanceCard />
+              <div className="lg:col-span-3"><PerformanceCard /></div>
 
             </div>
 

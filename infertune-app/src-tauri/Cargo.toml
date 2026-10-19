@@ -1,8 +1,8 @@
 [package]
 name = "infertune-app"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "Hardware-aware tuning studio for local LLMs"
+authors = ["InferTune"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -34,3 +34,9 @@ windows = { version = "0.61", features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Direct3D",
 ] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

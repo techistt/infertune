@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useAppStore } from "../store/useAppStore";
-import { getModelRankings, ModelRanking } from "../services/modelService";
+import { getModelRankings } from "../services/modelService";
 
 interface Recommendation {
 
@@ -17,17 +17,15 @@ export default function ModelRecommendationCard() {
 
     const {
         gpuStats,
-        hardware
+        hardware,
+        contextLength
     } = useAppStore();
 
 
     const [recommendation, setRecommendation]
         = useState<Recommendation | null>(null);
 
-    const {
-        rankings,
-        setRankings
-    } = useAppStore();
+    const { setRankings } = useAppStore();
 
 
 
@@ -56,7 +54,9 @@ export default function ModelRecommendationCard() {
                             vendor:
                                 gpuStats.vendor,
 
-                            task: "chat"
+                            task: "chat",
+
+                            context: contextLength
 
                         }
                     );
@@ -69,7 +69,8 @@ export default function ModelRecommendationCard() {
                         hardware.ram_total,
                         gpuStats.memory_total,
                         gpuStats.vendor,
-                        "chat"
+                        "chat",
+                        contextLength
                     );
 
 
@@ -94,8 +95,10 @@ export default function ModelRecommendationCard() {
 
 
     }, [
-        hardware,
-        gpuStats
+        hardware.ram_total,
+        gpuStats.memory_total,
+        gpuStats.vendor,
+        contextLength
     ]);
 
 
@@ -170,7 +173,7 @@ export default function ModelRecommendationCard() {
 
 
                             <p>
-                                {recommendation.score}/100
+                                {recommendation.score} pts
                             </p>
 
                         </div>
