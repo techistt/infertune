@@ -9,6 +9,15 @@ import {
 } from "../services/apiService";
 import { logger, errorMessage } from "../store/logStore";
 
+/** 32 random hex characters. */
+function newToken(): string {
+  const bytes = new Uint8Array(16);
+
+  crypto.getRandomValues(bytes);
+
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 export default function DesktopPanel() {
   const notificationsEnabled = useSettingsStore((s) => s.notificationsEnabled);
   const closeToTray = useSettingsStore((s) => s.closeToTray);
@@ -23,6 +32,11 @@ export default function DesktopPanel() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [portText, setPortText] = useState(String(apiPort));
+
+  // A token is on by default so websites cannot use the server.
+  useEffect(() => {
+    if (!useSettingsStore.getState().apiToken) setApiToken(newToken());
+  }, [setApiToken]);
 
   const refresh = useCallback(async () => setStatus(await getApiStatus()), []);
 
@@ -109,16 +123,24 @@ export default function DesktopPanel() {
 
         <label className="block text-sm">
           <span className="mb-1 block text-xs text-gray-400">
-            Access token (optional)
+            Access token
           </span>
           <input
             value={apiToken}
             disabled={!!status}
             onChange={(e) => setApiToken(e.target.value)}
             placeholder="none"
-            className="w-64 rounded-lg bg-gray-800 p-2 disabled:opacity-60"
+            className="w-64 rounded-lg bg-gray-800 p-2 font-mono text-sm disabled:opacity-60"
           />
         </label>
+
+        <button
+          onClick={() => setApiToken(newToken())}
+          disabled={!!status}
+          className="rounded-lg bg-gray-700 px-3 py-2 text-sm hover:bg-gray-600 disabled:opacity-50"
+        >
+          New token
+        </button>
 
         <button
           onClick={toggle}
@@ -145,8 +167,8 @@ export default function DesktopPanel() {
         </div>
         <div className="mt-1 font-mono break-all">Base URL: {address}</div>
         <div className="mt-1 text-xs text-gray-500">
-          Use any model name from your server and set the API key to your token
-          (or any text if none). It forwards to the server that is active when
+          Use any model name from your server and set the API key in the other app
+          to this token. Without a token, requests from web pages are refused. It forwards to the server that is active when
           you press Start; stop and start again after switching servers.
         </div>
       </div>

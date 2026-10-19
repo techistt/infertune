@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="public/logo-light.svg" alt="InferTune" width="360">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="public/logo.svg">
+    <img src="public/logo-light.svg" alt="InferTune" width="360">
+  </picture>
 </p>
 
 <p align="center"><b>Hardware-aware tuning studio for local LLMs</b></p>
