@@ -2,13 +2,15 @@ use serde::{Deserialize, Serialize};
 
 use std::process::Command;
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use sysinfo::System;
 
 use nvml_wrapper::Nvml;
 
+mod api_server;
 mod providers;
-use providers::{GenerateParams, ProviderConfig};
+use providers::{ChatMessage, GenerateParams, ProviderConfig};
 use tauri::Emitter;
 
 use std::os::windows::process::CommandExt;
@@ -74,6 +76,12 @@ struct SystemStats {
 
 struct AppState {
     system: Mutex<System>,
+    /// Cancel flags of in-flight streaming requests, by request id.
+    cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// The local API server, when running.
+    api: tokio::sync::Mutex<Option<api_server::ApiServer>>,
+    /// Hide the window instead of quitting when it is closed.
+    close_to_tray: AtomicBool,
 }
 
 #[derive(Serialize)]
@@ -95,6 +103,8 @@ struct GpuStats {
     memory_used: u64,
     memory_total: u64,
     temperature: u32,
+    /// Board power draw in watts (NVIDIA only; 0 when unknown).
+    power_watts: f32,
 }
 
 #[derive(Serialize)]
@@ -123,6 +133,7 @@ struct GenerateResponse {
     text: String,
     tokens: u32,
     generation_time: u64,
+    cancelled: bool,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -268,6 +279,8 @@ fn get_amd_gpu_stats(name: String) -> Option<GpuStats> {
         memory_total,
 
         temperature,
+
+        power_watts: 0.0,
     })
 }
 
@@ -331,6 +344,7 @@ fn get_intel_gpu_stats(name: String, luid: (u32, u32)) -> Option<GpuStats> {
         memory_used: 0,
         memory_total: 0,
         temperature: 0,
+        power_watts: 0.0,
     })
 }
 
@@ -434,6 +448,7 @@ fn get_all_gpus() -> Vec<GpuStats> {
                 memory_used,
                 memory_total,
                 temperature: 0,
+                power_watts: 0.0,
             });
 
             id += 1;
@@ -744,6 +759,7 @@ fn empty_gpu_stats(name: String, vendor: String) -> GpuStats {
         memory_used: 0,
         memory_total: 0,
         temperature: 0,
+        power_watts: 0.0,
     }
 }
 
@@ -760,6 +776,7 @@ fn collect_gpu_stats(id: u32) -> GpuStats {
                 memory_used: 0,
                 memory_total: 0,
                 temperature: 0,
+                power_watts: 0.0,
             };
         }
     };
@@ -797,6 +814,12 @@ fn nvidia_gpu_stats(name: &str) -> Option<GpuStats> {
         .temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu)
         .unwrap_or(0);
 
+    // NVML reports milliwatts.
+    let power_watts = device
+        .power_usage()
+        .map(|milliwatts| milliwatts as f32 / 1000.0)
+        .unwrap_or(0.0);
+
     Some(GpuStats {
         id: 0,
         name: name.to_string(),
@@ -806,6 +829,7 @@ fn nvidia_gpu_stats(name: &str) -> Option<GpuStats> {
         memory_used,
         memory_total,
         temperature,
+        power_watts,
     })
 }
 
@@ -951,6 +975,8 @@ struct ModelMeta {
     kv_bytes_per_token: Option<f64>,
     /// Largest context the model supports.
     max_context: Option<u64>,
+    /// Number of transformer layers (what the GPU offload setting counts).
+    layers: Option<u64>,
 }
 
 fn json_u64(value: &serde_json::Value) -> Option<u64> {
@@ -1021,6 +1047,7 @@ async fn fetch_model_meta_uncached(base_url: &str, name: &str) -> Option<ModelMe
         quantization,
         kv_bytes_per_token,
         max_context,
+        layers,
     })
 }
 
@@ -1384,18 +1411,21 @@ async fn provider_generate(
     model: String,
     system_prompt: String,
     user_prompt: String,
+    history: Option<Vec<ChatMessage>>,
     temperature: f32,
     top_p: f32,
     top_k: u32,
     max_tokens: u32,
     seed: u32,
     context_length: Option<u32>,
+    num_gpu: Option<i32>,
 ) -> Result<GenerateResponse, String> {
     let provider = provider.unwrap_or_default();
 
     let params = GenerateParams {
         model,
         system_prompt,
+        history: history.unwrap_or_default(),
         user_prompt,
         temperature,
         top_p,
@@ -1403,6 +1433,7 @@ async fn provider_generate(
         max_tokens,
         seed,
         context_length: context_length.unwrap_or(DEFAULT_CONTEXT as u32),
+        num_gpu,
     };
 
     let output = providers::generate(&provider, &params).await?;
@@ -1411,7 +1442,148 @@ async fn provider_generate(
         text: output.text,
         tokens: output.tokens,
         generation_time: output.generation_time,
+        cancelled: false,
     })
+}
+
+#[derive(Serialize, Clone)]
+struct ChatChunk {
+    id: String,
+    delta: String,
+}
+
+/// Generates a reply and emits `chat-chunk` events with the text as it arrives.
+/// `request_id` lets the UI stop the request with `cancel_generation`.
+#[tauri::command]
+async fn provider_generate_stream(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    request_id: String,
+    provider: Option<ProviderConfig>,
+    model: String,
+    system_prompt: String,
+    user_prompt: String,
+    history: Option<Vec<ChatMessage>>,
+    temperature: f32,
+    top_p: f32,
+    top_k: u32,
+    max_tokens: u32,
+    seed: u32,
+    context_length: Option<u32>,
+    num_gpu: Option<i32>,
+) -> Result<GenerateResponse, String> {
+    let provider = provider.unwrap_or_default();
+
+    let params = GenerateParams {
+        model,
+        system_prompt,
+        history: history.unwrap_or_default(),
+        user_prompt,
+        temperature,
+        top_p,
+        top_k,
+        max_tokens,
+        seed,
+        context_length: context_length.unwrap_or(DEFAULT_CONTEXT as u32),
+        num_gpu,
+    };
+
+    let cancel = Arc::new(AtomicBool::new(false));
+
+    if let Ok(mut flags) = state.cancels.lock() {
+        flags.insert(request_id.clone(), cancel.clone());
+    }
+
+    let id = request_id.clone();
+    let result = providers::generate_stream(&provider, &params, cancel, |delta| {
+        let _ = app.emit(
+            "chat-chunk",
+            ChatChunk {
+                id: id.clone(),
+                delta: delta.to_string(),
+            },
+        );
+    })
+    .await;
+
+    if let Ok(mut flags) = state.cancels.lock() {
+        flags.remove(&request_id);
+    }
+
+    let output = result?;
+
+    Ok(GenerateResponse {
+        text: output.text,
+        tokens: output.tokens,
+        generation_time: output.generation_time,
+        cancelled: output.cancelled,
+    })
+}
+
+/// Stops a request started with `provider_generate_stream`.
+#[tauri::command]
+fn cancel_generation(state: tauri::State<AppState>, request_id: String) {
+    if let Ok(flags) = state.cancels.lock() {
+        if let Some(flag) = flags.get(&request_id) {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+/// Keeps file names safe: letters, digits, dash, underscore and dot only.
+fn sanitize_file_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' })
+        .collect();
+
+    let cleaned = cleaned.trim_matches('.').to_string();
+
+    if cleaned.is_empty() {
+        "infertune-export.txt".to_string()
+    } else {
+        cleaned
+    }
+}
+
+/// Saves text (a report, CSV, ...) into the user's Downloads folder and
+/// returns the full path. Never overwrites: a number is added when needed.
+#[tauri::command]
+fn save_download(file_name: String, content: String) -> Result<String, String> {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .map_err(|_| "Could not find your user folder".to_string())?;
+
+    let folder = std::path::Path::new(&home).join("Downloads");
+    std::fs::create_dir_all(&folder).map_err(|e| format!("Cannot create {}: {}", folder.display(), e))?;
+
+    let name = sanitize_file_name(&file_name);
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((stem, ext)) => (stem.to_string(), format!(".{}", ext)),
+        None => (name.clone(), String::new()),
+    };
+
+    let mut path = folder.join(&name);
+    let mut counter = 1;
+
+    while path.exists() {
+        path = folder.join(format!("{} ({}){}", stem, counter, ext));
+        counter += 1;
+    }
+
+    std::fs::write(&path, content).map_err(|e| format!("Cannot write {}: {}", path.display(), e))?;
+
+    Ok(path.display().to_string())
+}
+
+/// Shows a file in Windows Explorer.
+#[tauri::command]
+fn reveal_file(path: String) -> Result<(), String> {
+    Command::new("explorer")
+        .arg(format!("/select,{}", path))
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// Downloads an Ollama model, emitting `pull-progress` events as it goes.
@@ -1434,15 +1606,128 @@ async fn ollama_delete(provider: Option<ProviderConfig>, model: String) -> Resul
     providers::delete_model(&provider.unwrap_or_default(), &model).await
 }
 
+/// Starts (or restarts) the local API server that forwards `/v1/...` calls to
+/// the given server. It only listens on 127.0.0.1.
+#[tauri::command]
+async fn api_server_start(
+    state: tauri::State<'_, AppState>,
+    provider: ProviderConfig,
+    port: u16,
+    token: Option<String>,
+) -> Result<api_server::ApiStatus, String> {
+    let mut guard = state.api.lock().await;
+
+    if let Some(mut old) = guard.take() {
+        old.stop();
+        // Give the old listener a moment to release the port.
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+
+    let server = api_server::start(provider, port, token).await?;
+    let status = server.status();
+
+    *guard = Some(server);
+
+    Ok(status)
+}
+
+#[tauri::command]
+async fn api_server_stop(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    if let Some(mut server) = state.api.lock().await.take() {
+        server.stop();
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn api_server_status(
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<api_server::ApiStatus>, String> {
+    Ok(state.api.lock().await.as_ref().map(|s| s.status()))
+}
+
+#[tauri::command]
+fn set_close_to_tray(state: tauri::State<'_, AppState>, enabled: bool) {
+    state.close_to_tray.store(enabled, Ordering::Relaxed);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    use tauri::menu::{Menu, MenuItem};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+    use tauri::Manager;
+
+    fn show_main(app: &tauri::AppHandle) {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.show();
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+        }
+    }
+
     tauri::Builder::default()
         .manage(AppState {
             system: Mutex::new(System::new_all()),
+            cancels: Mutex::new(HashMap::new()),
+            api: tokio::sync::Mutex::new(None),
+            close_to_tray: AtomicBool::new(false),
         })
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
+        .setup(|app| {
+            let show = MenuItem::with_id(app, "show", "Show InferTune", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &quit])?;
+
+            let mut tray = TrayIconBuilder::new()
+                .tooltip("InferTune")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => show_main(app),
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        show_main(tray.app_handle());
+                    }
+                });
+
+            if let Some(icon) = app.default_window_icon() {
+                tray = tray.icon(icon.clone());
+            }
+
+            tray.build(app)?;
+
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let state = window.app_handle().state::<AppState>();
+
+                if state.close_to_tray.load(Ordering::Relaxed) {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             provider_generate,
+            provider_generate_stream,
+            cancel_generation,
+            api_server_start,
+            api_server_stop,
+            api_server_status,
+            set_close_to_tray,
+            save_download,
+            reveal_file,
             provider_models,
             provider_status,
             ollama_pull,
@@ -1548,5 +1833,14 @@ mod tests {
         assert!(quantization_bonus(Some("q4_k_m")) > quantization_bonus(Some("q8_0")));
         assert!(quantization_bonus(Some("q8_0")) > quantization_bonus(Some("f32")));
         assert_eq!(quantization_bonus(None), 0);
+    }
+
+    #[test]
+    fn download_file_names_are_sanitized() {
+        let name = sanitize_file_name("../a b?.html");
+        assert_eq!(name, "_a_b_.html");
+        assert!(!name.contains('/') && !name.contains('\\'));
+        assert_eq!(sanitize_file_name("..."), "infertune-export.txt");
+        assert_eq!(sanitize_file_name("report-2026_10.html"), "report-2026_10.html");
     }
 }

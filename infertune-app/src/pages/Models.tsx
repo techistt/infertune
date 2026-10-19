@@ -14,6 +14,7 @@ import { logger, errorMessage } from "../store/logStore";
 import { FIT_CLASS, FIT_LABEL, formatGb, modelFit } from "../utils/format";
 import ContextSelect from "../components/ContextSelect";
 import Bar from "../components/Bar";
+import { discover } from "../utils/discovery";
 
 const EXAMPLES = ["llama3.2:3b", "qwen2.5:7b", "mistral:7b", "gemma2:2b"];
 
@@ -96,8 +97,8 @@ export default function Models() {
     };
   }, []);
 
-  const startPull = async () => {
-    const name = pullName.trim();
+  const startPull = async (override?: string) => {
+    const name = (override ?? pullName).trim();
 
     if (!name || pulling) return;
 
@@ -348,7 +349,7 @@ export default function Models() {
               />
 
               <button
-                onClick={startPull}
+                onClick={() => startPull()}
                 disabled={pulling || !pullName.trim()}
                 className="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 hover:bg-blue-700 disabled:opacity-50"
               >
@@ -393,6 +394,68 @@ export default function Models() {
           </p>
         )}
       </div>
+
+      {isOllama && (
+        <div className="rounded-xl border border-gray-800 bg-gray-900 p-5">
+          <h2 className="text-xl font-semibold mb-1">Discover models</h2>
+          <p className="text-sm text-gray-400 mb-4">
+            Popular models, sorted by how well they should run on this
+            computer. Sizes and fit are approximate.
+          </p>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-gray-400 border-b border-gray-800">
+                  <th className="py-2 pr-4 font-medium">Model</th>
+                  <th className="py-2 pr-4 font-medium">Params</th>
+                  <th className="py-2 pr-4 font-medium">Download</th>
+                  <th className="py-2 pr-4 font-medium">Fit</th>
+                  <th className="py-2 font-medium"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {discover(
+                  rows.map((r) => r.name),
+                  gpuMemory,
+                  ramTotal
+                ).map((m) => (
+                  <tr key={m.name} className="border-b border-gray-800/60">
+                    <td className="py-2 pr-4">
+                      <div className="font-medium">{m.name}</div>
+                      <div className="text-xs text-gray-500">
+                        {m.family} · {m.purpose}
+                      </div>
+                    </td>
+                    <td className="py-2 pr-4">{m.paramsB}B</td>
+                    <td className="py-2 pr-4">~{m.sizeGb.toFixed(1)} GB</td>
+                    <td className="py-2 pr-4">
+                      <span
+                        className={`rounded px-2 py-1 text-xs whitespace-nowrap ${FIT_CLASS[m.fit]}`}
+                      >
+                        {FIT_LABEL[m.fit]}
+                      </span>
+                    </td>
+                    <td className="py-2 text-right">
+                      {m.installed ? (
+                        <span className="text-xs text-gray-500">Installed</span>
+                      ) : (
+                        <button
+                          onClick={() => startPull(m.name)}
+                          disabled={pulling || m.fit === "toolarge"}
+                          className="rounded-lg bg-blue-600 px-3 py-1.5 hover:bg-blue-700 disabled:opacity-50"
+                        >
+                          Download
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
     </div>
   );

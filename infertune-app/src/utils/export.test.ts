@@ -22,6 +22,8 @@ function result(overrides: Partial<BenchmarkResult> = {}): BenchmarkResult {
     peakRamGb: 6.25,
     peakGpu: 88,
     peakVramGb: 4.5,
+    peakTempC: 70.2,
+    avgPowerW: 41.6,
     ...overrides,
   };
 }
@@ -34,6 +36,14 @@ describe("buildCsv", () => {
     expect(lines[0]).toContain("Avg tok/s");
     expect(lines[1]).toContain("llama3.2:3b");
     expect(lines[1]).toContain("50.00");
+  });
+
+  it("includes temperature and power, and leaves them blank when unknown", () => {
+    const [, withData] = buildCsv([result()]).split("\n");
+    const [, without] = buildCsv([result({ peakTempC: undefined, avgPowerW: undefined })]).split("\n");
+
+    expect(withData.endsWith(",70,42")).toBe(true);
+    expect(without.endsWith(",,")).toBe(true);
   });
 
   it("quotes cells that contain commas or quotes", () => {

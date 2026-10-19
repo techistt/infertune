@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { SessionRecord } from "./historyStore";
+import type { ChatTurn } from "../types/llm";
 
 export type Page =
   | "dashboard"
@@ -7,6 +8,9 @@ export type Page =
   | "models"
   | "benchmarks"
   | "compare"
+  | "quality"
+  | "autotune"
+  | "finetune"
   | "sessions"
   | "logs"
   | "settings";
@@ -25,6 +29,8 @@ export interface GpuStats {
   memory_used: number;
   memory_total: number;
   temperature: number;
+  /** Board power draw in watts (NVIDIA only; 0 when unknown). */
+  power_watts: number;
 }
 
 export interface ModelRanking {
@@ -54,9 +60,17 @@ interface AppState {
   maxTokens: number;
   seed: number;
   contextLength: number;
+  /** Ollama only: layers on the GPU. null lets Ollama decide. */
+  numGpu: number | null;
 
   systemPrompt: string;
   userPrompt: string;
+
+  /** Keep earlier turns and send them with each new message. */
+  conversationMode: boolean;
+  conversation: ChatTurn[];
+  /** True while a response is being generated. */
+  generating: boolean;
 
   response: string;
   tokens: number;
@@ -74,6 +88,11 @@ interface AppState {
   setMaxTokens: (value: number) => void;
   setSeed: (value: number) => void;
   setContextLength: (value: number) => void;
+  setNumGpu: (value: number | null) => void;
+
+  setConversationMode: (value: boolean) => void;
+  setConversation: (turns: ChatTurn[]) => void;
+  setGenerating: (value: boolean) => void;
 
   setSystemPrompt: (value: string) => void;
   setUserPrompt: (value: string) => void;
@@ -116,6 +135,11 @@ export const useAppStore = create<AppState>((set) => ({
   maxTokens: 1024,
   seed: 42,
   contextLength: 4096,
+  numGpu: null,
+
+  conversationMode: false,
+  conversation: [],
+  generating: false,
 
   systemPrompt: "You are a helpful AI assistant.",
   userPrompt: "",
@@ -144,6 +168,7 @@ export const useAppStore = create<AppState>((set) => ({
     memory_used: 0,
     memory_total: 0,
     temperature: 0,
+    power_watts: 0,
   },
 
   rankings: [],
@@ -155,6 +180,11 @@ export const useAppStore = create<AppState>((set) => ({
   setMaxTokens: (maxTokens) => set({ maxTokens }),
   setSeed: (seed) => set({ seed }),
   setContextLength: (contextLength) => set({ contextLength }),
+  setNumGpu: (numGpu) => set({ numGpu }),
+
+  setConversationMode: (conversationMode) => set({ conversationMode }),
+  setConversation: (conversation) => set({ conversation }),
+  setGenerating: (generating) => set({ generating }),
 
   setSystemPrompt: (systemPrompt) => set({ systemPrompt }),
   setUserPrompt: (userPrompt) => set({ userPrompt }),
@@ -207,6 +237,8 @@ export const useAppStore = create<AppState>((set) => ({
       maxTokens: session.maxTokens,
       seed: session.seed,
       contextLength: session.contextLength,
+      conversationMode: false,
+      conversation: [],
       systemPrompt: session.systemPrompt,
       userPrompt: session.userPrompt,
       response: session.response,

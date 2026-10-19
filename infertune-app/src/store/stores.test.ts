@@ -130,3 +130,69 @@ describe("log store", () => {
     expect(errorMessage({ a: 1 })).toBe('{"a":1}');
   });
 });
+
+describe("desktop preferences", () => {
+  beforeEach(() => useSettingsStore.getState().resetSettings());
+
+  it("has safe defaults", () => {
+    const s = useSettingsStore.getState();
+
+    expect(s.notificationsEnabled).toBe(true);
+    expect(s.closeToTray).toBe(false);
+    expect(s.apiPort).toBe(11500);
+    expect(s.apiToken).toBe("");
+  });
+
+  it("keeps the API port in a usable range", () => {
+    useSettingsStore.getState().setApiPort(8080);
+    expect(useSettingsStore.getState().apiPort).toBe(8080);
+
+    useSettingsStore.getState().setApiPort(80);
+    expect(useSettingsStore.getState().apiPort).toBe(11500);
+
+    useSettingsStore.getState().setApiPort(Number.NaN);
+    expect(useSettingsStore.getState().apiPort).toBe(11500);
+
+    useSettingsStore.getState().setApiPort(70000);
+    expect(useSettingsStore.getState().apiPort).toBe(11500);
+  });
+});
+
+describe("quality history", () => {
+  beforeEach(() => useHistoryStore.getState().clearQualityRuns());
+
+  const run = (id: string) => ({
+    id,
+    createdAt: 1,
+    providerName: "Ollama",
+    model: "m",
+    correct: 9,
+    total: 12,
+    percent: 75,
+    byCategory: [],
+    answers: [],
+    avgTokensPerSecond: 10,
+  });
+
+  it("adds newest first, deletes and clears", () => {
+    const h = useHistoryStore.getState();
+
+    h.addQualityRun(run("a"));
+    h.addQualityRun(run("b"));
+    expect(useHistoryStore.getState().qualityRuns.map((r) => r.id)).toEqual(["b", "a"]);
+
+    h.deleteQualityRun("b");
+    expect(useHistoryStore.getState().qualityRuns).toHaveLength(1);
+
+    h.clearQualityRuns();
+    expect(useHistoryStore.getState().qualityRuns).toEqual([]);
+  });
+
+  it("keeps at most 50 runs", () => {
+    const h = useHistoryStore.getState();
+
+    for (let i = 0; i < 60; i++) h.addQualityRun(run(String(i)));
+
+    expect(useHistoryStore.getState().qualityRuns).toHaveLength(50);
+  });
+});

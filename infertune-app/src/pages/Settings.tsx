@@ -10,6 +10,7 @@ import {
 } from "../types/provider";
 import { checkProvider } from "../services/modelService";
 import { logger } from "../store/logStore";
+import DesktopPanel from "../components/DesktopPanel";
 
 type TestState = "idle" | "testing" | "ok" | "fail";
 
@@ -318,6 +319,8 @@ export default function Settings() {
           API keys are stored on this computer only, in the app's local storage.
         </p>
       </section>
+
+      <DesktopPanel />
 
       <section className="rounded-xl border border-gray-800 bg-gray-900 p-5">
         <h2 className="text-xl font-semibold">Monitoring</h2>

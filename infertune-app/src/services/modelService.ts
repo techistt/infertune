@@ -14,6 +14,8 @@ export interface ModelDetails {
   quantization: string | null;
   kv_bytes_per_token: number | null;
   max_context: number | null;
+  /** Transformer layers, when the server reports it. */
+  layers: number | null;
 }
 
 export interface PullProgress {

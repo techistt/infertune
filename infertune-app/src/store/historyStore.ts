@@ -42,8 +42,34 @@ export interface BenchmarkResult {
   peakRamGb: number;
   peakGpu: number;
   peakVramGb: number;
+  /** Highest GPU temperature seen, in °C (missing in older results). */
+  peakTempC?: number;
+  /** Average and highest GPU power draw in watts (NVIDIA only). */
+  avgPowerW?: number;
+  peakPowerW?: number;
 }
 
+export interface QualityRun {
+  id: string;
+  createdAt: number;
+  providerName: string;
+  model: string;
+  correct: number;
+  total: number;
+  percent: number;
+  byCategory: { category: string; correct: number; total: number }[];
+  answers: {
+    id: string;
+    category: string;
+    prompt: string;
+    expected: string;
+    answer: string;
+    correct: boolean;
+  }[];
+  avgTokensPerSecond: number;
+}
+
+const MAX_QUALITY = 50;
 const MAX_SESSIONS = 200;
 const MAX_BENCHMARKS = 100;
 
@@ -54,6 +80,7 @@ export function newRecordId(): string {
 interface HistoryState {
   sessions: SessionRecord[];
   benchmarks: BenchmarkResult[];
+  qualityRuns: QualityRun[];
 
   addSession: (session: SessionRecord) => void;
   deleteSession: (id: string) => void;
@@ -62,6 +89,10 @@ interface HistoryState {
   addBenchmark: (result: BenchmarkResult) => void;
   deleteBenchmark: (id: string) => void;
   clearBenchmarks: () => void;
+
+  addQualityRun: (run: QualityRun) => void;
+  deleteQualityRun: (id: string) => void;
+  clearQualityRuns: () => void;
 }
 
 export const useHistoryStore = create<HistoryState>()(
@@ -69,6 +100,7 @@ export const useHistoryStore = create<HistoryState>()(
     (set) => ({
       sessions: [],
       benchmarks: [],
+      qualityRuns: [],
 
       addSession: (session) =>
         set((state) => ({
@@ -93,6 +125,18 @@ export const useHistoryStore = create<HistoryState>()(
         })),
 
       clearBenchmarks: () => set({ benchmarks: [] }),
+
+      addQualityRun: (run) =>
+        set((state) => ({
+          qualityRuns: [run, ...(state.qualityRuns ?? [])].slice(0, MAX_QUALITY),
+        })),
+
+      deleteQualityRun: (id) =>
+        set((state) => ({
+          qualityRuns: (state.qualityRuns ?? []).filter((r) => r.id !== id),
+        })),
+
+      clearQualityRuns: () => set({ qualityRuns: [] }),
     }),
     { name: "infertune-history", version: 1 }
   )

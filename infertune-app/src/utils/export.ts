@@ -20,6 +20,8 @@ export function buildCsv(results: BenchmarkResult[]): string {
     "Peak RAM GB",
     "Peak GPU %",
     "Peak VRAM GB",
+    "Peak temp C",
+    "Avg power W",
   ];
 
   const lines = results.map((r) =>
@@ -37,6 +39,8 @@ export function buildCsv(results: BenchmarkResult[]): string {
       r.peakRamGb.toFixed(1),
       r.peakGpu.toFixed(0),
       r.peakVramGb.toFixed(1),
+      r.peakTempC ? r.peakTempC.toFixed(0) : "",
+      r.avgPowerW ? r.avgPowerW.toFixed(0) : "",
     ]
       .map(csvCell)
       .join(",")

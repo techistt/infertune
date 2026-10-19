@@ -1,11 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { Play, Square, Trash2 } from "lucide-react";
-import {
-  useAppStore,
-  type GpuStats,
-  type HardwareStats,
-} from "../store/useAppStore";
+import { useAppStore } from "../store/useAppStore";
 import { getActiveProfile, useActiveProfile } from "../store/settingsStore";
 import {
   useHistoryStore,
@@ -16,9 +11,9 @@ import {
 import { toConfig } from "../types/provider";
 import { listModels } from "../services/modelService";
 import { generateText } from "../services/llmService";
+import { startSampler } from "../services/sampler";
 import { logger, errorMessage } from "../store/logStore";
 import {
-  bytesToGb,
   formatDateTime,
   formatDuration,
   tokensPerSecond,
@@ -29,6 +24,11 @@ import VramWarning from "../components/VramWarning";
 import SpeedChart from "../components/SpeedChart";
 import { buildCsv, buildMarkdown } from "../utils/export";
 import { withHint } from "../utils/hints";
+import TrendChart from "../components/TrendChart";
+import { buildHtmlReport } from "../utils/report";
+import { dateStamp, revealFile, saveDownload } from "../services/fileService";
+import { tokensPerJoule } from "../utils/trend";
+import { notifyDone } from "../services/notify";
 
 const PROMPTS = [
   {
@@ -54,46 +54,13 @@ const PROMPTS = [
   { id: "custom", name: "Custom prompt", text: "" },
 ];
 
-/** Samples CPU / RAM / GPU / VRAM while a model generates and keeps the peaks. */
-function startSampler(gpuId: number) {
-  const peak = { cpu: 0, ramGb: 0, gpu: 0, vramGb: 0 };
-  let busy = false;
-
-  const sample = async () => {
-    if (busy) return;
-    busy = true;
-
-    try {
-      const system = await invoke<HardwareStats>("get_system_stats");
-      const gpu = await invoke<GpuStats>("get_gpu_stats", { id: gpuId });
-
-      peak.cpu = Math.max(peak.cpu, system.cpu_usage);
-      peak.ramGb = Math.max(peak.ramGb, bytesToGb(system.ram_used));
-      peak.gpu = Math.max(peak.gpu, gpu.usage);
-      peak.vramGb = Math.max(peak.vramGb, bytesToGb(gpu.memory_used));
-    } catch {
-      // A missed sample is fine.
-    } finally {
-      busy = false;
-    }
-  };
-
-  sample();
-  const timer = setInterval(sample, 700);
-
-  return {
-    stop: () => {
-      clearInterval(timer);
-      return peak;
-    },
-  };
-}
-
 function average(values: number[]): number {
   return values.length > 0
     ? values.reduce((a, b) => a + b, 0) / values.length
     : 0;
 }
+
+const bytesToGbLocal = (bytes: number) => bytes / 1024 ** 3;
 
 export default function Benchmarks() {
   const profile = useActiveProfile();
@@ -119,6 +86,8 @@ export default function Benchmarks() {
   const [error, setError] = useState<string | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
   const [copied, setCopied] = useState<"" | "csv" | "md">("");
+  const [reportMessage, setReportMessage] = useState("");
+  const [reportPath, setReportPath] = useState<string | null>(null);
 
   const cancelRef = useRef(false);
 
@@ -253,6 +222,9 @@ export default function Benchmarks() {
           peakRamGb: peak.ramGb,
           peakGpu: peak.gpu,
           peakVramGb: peak.vramGb,
+          peakTempC: peak.tempC > 0 ? peak.tempC : undefined,
+          avgPowerW: peak.avgPowerW > 0 ? peak.avgPowerW : undefined,
+          peakPowerW: peak.peakPowerW > 0 ? peak.peakPowerW : undefined,
         };
 
         useHistoryStore.getState().addBenchmark(entry);
@@ -267,6 +239,10 @@ export default function Benchmarks() {
     setStatus(cancelRef.current ? "Stopped" : "Finished");
     setRunning(false);
     logger.info("benchmark", cancelRef.current ? "Stopped by user" : "Finished");
+
+    if (!cancelRef.current) {
+      notifyDone("Benchmark finished", `${selected.length} model(s) measured.`);
+    }
   };
 
   const copyAs = async (kind: "csv" | "md") => {
@@ -278,6 +254,30 @@ export default function Benchmarks() {
       setTimeout(() => setCopied(""), 1500);
     } catch {
       // Clipboard unavailable.
+    }
+  };
+
+  const exportReport = async () => {
+    const state = useAppStore.getState();
+
+    setReportPath(null);
+
+    try {
+      const html = buildHtmlReport(results, {
+        gpuName: state.gpuStats.name,
+        vramGb: bytesToGbLocal(state.gpuStats.memory_total),
+        ramGb: bytesToGbLocal(state.hardware.ram_total),
+      });
+
+      const path = await saveDownload(
+        `infertune-benchmarks-${dateStamp()}.html`,
+        html
+      );
+
+      setReportPath(path);
+      setReportMessage("Report saved to your Downloads folder.");
+    } catch (e) {
+      setReportMessage(`Could not save the report: ${errorMessage(e)}`);
     }
   };
 
@@ -451,6 +451,13 @@ export default function Benchmarks() {
           {results.length > 0 && (
             <div className="flex items-center gap-2">
               <button
+                onClick={exportReport}
+                className="rounded-lg bg-blue-600 px-3 py-2 hover:bg-blue-700"
+              >
+                Export report
+              </button>
+
+              <button
                 onClick={() => copyAs("md")}
                 className="rounded-lg bg-gray-700 px-3 py-2 hover:bg-gray-600"
               >
@@ -494,9 +501,24 @@ export default function Benchmarks() {
           )}
         </div>
 
+        {reportMessage && (
+          <p className="mt-3 text-sm text-gray-300">
+            {reportMessage}{" "}
+            {reportPath && (
+              <button
+                onClick={() => revealFile(reportPath).catch(() => {})}
+                className="text-blue-400 hover:underline"
+              >
+                Show in folder
+              </button>
+            )}
+          </p>
+        )}
+
         {results.length > 0 && (
-          <div className="mt-5">
+          <div className="mt-5 space-y-6">
             <SpeedChart results={results} />
+            <TrendChart results={results} />
           </div>
         )}
 
@@ -513,6 +535,7 @@ export default function Benchmarks() {
                   <th className="py-2 pr-4 font-medium">Peak RAM</th>
                   <th className="py-2 pr-4 font-medium">Peak GPU</th>
                   <th className="py-2 pr-4 font-medium">Peak VRAM</th>
+                  <th className="py-2 pr-4 font-medium">GPU temp / power</th>
                   <th className="py-2 font-medium"></th>
                 </tr>
               </thead>
@@ -548,6 +571,16 @@ export default function Benchmarks() {
                     <td className="py-3 pr-4">{r.peakRamGb.toFixed(1)} GB</td>
                     <td className="py-3 pr-4">{r.peakGpu.toFixed(0)}%</td>
                     <td className="py-3 pr-4">{r.peakVramGb.toFixed(1)} GB</td>
+                    <td className="py-3 pr-4 whitespace-nowrap">
+                      {r.peakTempC ? `${r.peakTempC.toFixed(0)} °C` : "-"}
+                      {" · "}
+                      {r.avgPowerW ? `${r.avgPowerW.toFixed(0)} W` : "-"}
+                      {tokensPerJoule(r.avgTokensPerSecond, r.avgPowerW) !== null && (
+                        <div className="text-xs text-gray-500">
+                          {tokensPerJoule(r.avgTokensPerSecond, r.avgPowerW)!.toFixed(2)} tok/J
+                        </div>
+                      )}
+                    </td>
 
                     <td className="py-3">
                       <button

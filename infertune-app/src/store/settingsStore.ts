@@ -12,6 +12,15 @@ export const DEFAULT_PROVIDER: ProviderProfile = {
   apiKey: "",
 };
 
+export const DEFAULT_API_PORT = 11500;
+
+/** A usable TCP port; anything else falls back to the default. */
+export function clampPort(port: number): number {
+  const n = Math.round(port);
+
+  return Number.isFinite(n) && n >= 1024 && n <= 65535 ? n : DEFAULT_API_PORT;
+}
+
 function newId(): string {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
@@ -20,12 +29,23 @@ interface SettingsState {
   providers: ProviderProfile[];
   activeProviderId: string;
   pollIntervalMs: number;
+  /** Desktop notification when long jobs finish (window not focused). */
+  notificationsEnabled: boolean;
+  /** Closing the window hides it to the tray instead of quitting. */
+  closeToTray: boolean;
+  apiPort: number;
+  /** Optional bearer token required by the local API server. */
+  apiToken: string;
 
   addProvider: (profile: Omit<ProviderProfile, "id">) => string;
   updateProvider: (id: string, patch: Partial<Omit<ProviderProfile, "id">>) => void;
   removeProvider: (id: string) => void;
   setActiveProvider: (id: string) => void;
   setPollInterval: (ms: number) => void;
+  setNotificationsEnabled: (enabled: boolean) => void;
+  setCloseToTray: (enabled: boolean) => void;
+  setApiPort: (port: number) => void;
+  setApiToken: (token: string) => void;
   resetSettings: () => void;
 }
 
@@ -35,6 +55,10 @@ export const useSettingsStore = create<SettingsState>()(
       providers: [DEFAULT_PROVIDER],
       activeProviderId: DEFAULT_PROVIDER.id,
       pollIntervalMs: 2000,
+      notificationsEnabled: true,
+      closeToTray: false,
+      apiPort: DEFAULT_API_PORT,
+      apiToken: "",
 
       addProvider: (profile) => {
         const id = newId();
@@ -74,11 +98,24 @@ export const useSettingsStore = create<SettingsState>()(
 
       setPollInterval: (pollIntervalMs) => set({ pollIntervalMs }),
 
+      setNotificationsEnabled: (notificationsEnabled) =>
+        set({ notificationsEnabled }),
+
+      setCloseToTray: (closeToTray) => set({ closeToTray }),
+
+      setApiPort: (apiPort) => set({ apiPort: clampPort(apiPort) }),
+
+      setApiToken: (apiToken) => set({ apiToken }),
+
       resetSettings: () =>
         set({
           providers: [DEFAULT_PROVIDER],
           activeProviderId: DEFAULT_PROVIDER.id,
           pollIntervalMs: 2000,
+          notificationsEnabled: true,
+          closeToTray: false,
+          apiPort: DEFAULT_API_PORT,
+          apiToken: "",
         }),
     }),
     { name: "infertune-settings", version: 1 }

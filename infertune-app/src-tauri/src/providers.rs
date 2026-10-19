@@ -10,6 +10,8 @@
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
@@ -63,10 +65,20 @@ pub struct ModelEntry {
     pub size: u64,
 }
 
+/// One earlier turn of a conversation.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChatMessage {
+    /// "user" or "assistant"
+    pub role: String,
+    pub content: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct GenerateParams {
     pub model: String,
     pub system_prompt: String,
+    /// Earlier turns, oldest first. Empty for a single prompt.
+    pub history: Vec<ChatMessage>,
     pub user_prompt: String,
     pub temperature: f32,
     pub top_p: f32,
@@ -74,6 +86,8 @@ pub struct GenerateParams {
     pub max_tokens: u32,
     pub seed: u32,
     pub context_length: u32,
+    /// Ollama only: how many layers to offload to the GPU (None = automatic).
+    pub num_gpu: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -82,6 +96,8 @@ pub struct GenerateOutput {
     pub tokens: u32,
     /// Milliseconds spent generating.
     pub generation_time: u64,
+    /// True when the caller stopped a streaming request early.
+    pub cancelled: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -114,15 +130,39 @@ fn round3(value: f32) -> f64 {
     (value as f64 * 1000.0).round() / 1000.0
 }
 
-fn messages(system_prompt: &str, user_prompt: &str) -> Vec<Value> {
+fn messages(p: &GenerateParams) -> Vec<Value> {
     let mut list = Vec::new();
 
-    if !system_prompt.trim().is_empty() {
-        list.push(json!({ "role": "system", "content": system_prompt }));
+    if !p.system_prompt.trim().is_empty() {
+        list.push(json!({ "role": "system", "content": p.system_prompt }));
     }
 
-    list.push(json!({ "role": "user", "content": user_prompt }));
+    for turn in &p.history {
+        // Only user/assistant turns are accepted from the UI.
+        let role = if turn.role == "assistant" { "assistant" } else { "user" };
+        list.push(json!({ "role": role, "content": turn.content }));
+    }
+
+    list.push(json!({ "role": "user", "content": p.user_prompt }));
     list
+}
+
+/// Request options for Ollama's native API.
+fn ollama_options(p: &GenerateParams) -> Value {
+    let mut options = json!({
+        "temperature": round3(p.temperature),
+        "top_p": round3(p.top_p),
+        "top_k": p.top_k,
+        "seed": p.seed,
+        "num_predict": p.max_tokens,
+        "num_ctx": p.context_length
+    });
+
+    if let Some(layers) = p.num_gpu {
+        options["num_gpu"] = json!(layers);
+    }
+
+    options
 }
 
 async fn error_text(response: reqwest::Response) -> String {
@@ -218,15 +258,8 @@ async fn generate_ollama(
     let body = json!({
         "model": p.model,
         "stream": false,
-        "messages": messages(&p.system_prompt, &p.user_prompt),
-        "options": {
-            "temperature": round3(p.temperature),
-            "top_p": round3(p.top_p),
-            "top_k": p.top_k,
-            "seed": p.seed,
-            "num_predict": p.max_tokens,
-            "num_ctx": p.context_length
-        }
+        "messages": messages(p),
+        "options": ollama_options(p)
     });
 
     let started = Instant::now();
@@ -267,6 +300,7 @@ async fn generate_ollama(
         text,
         tokens,
         generation_time,
+        cancelled: false,
     })
 }
 
@@ -281,7 +315,7 @@ async fn generate_openai(
     let body = json!({
         "model": p.model,
         "stream": false,
-        "messages": messages(&p.system_prompt, &p.user_prompt),
+        "messages": messages(p),
         "temperature": round3(p.temperature),
         "top_p": round3(p.top_p),
         "top_k": p.top_k,
@@ -332,6 +366,178 @@ async fn generate_openai(
         text,
         tokens,
         generation_time,
+        cancelled: false,
+    })
+}
+
+/// Like [`generate`], but reports text as it arrives. Setting `cancel` stops
+/// the request; the text received so far is returned with `cancelled = true`.
+pub async fn generate_stream<F: FnMut(&str)>(
+    cfg: &ProviderConfig,
+    params: &GenerateParams,
+    cancel: Arc<AtomicBool>,
+    mut on_chunk: F,
+) -> Result<GenerateOutput, String> {
+    let started = Instant::now();
+
+    let request = if cfg.is_ollama() {
+        authed(client()?.post(format!("{}/api/chat", cfg.root())), cfg).json(&json!({
+            "model": params.model,
+            "stream": true,
+            "messages": messages(params),
+            "options": ollama_options(params)
+        }))
+    } else {
+        authed(
+            client()?.post(format!("{}/v1/chat/completions", cfg.root())),
+            cfg,
+        )
+        .json(&json!({
+            "model": params.model,
+            "stream": true,
+            "stream_options": { "include_usage": true },
+            "messages": messages(params),
+            "temperature": round3(params.temperature),
+            "top_p": round3(params.top_p),
+            "top_k": params.top_k,
+            "max_tokens": params.max_tokens,
+            "seed": params.seed
+        }))
+    };
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| format!("Could not connect to {}: {}", cfg.root(), e))?;
+
+    if !response.status().is_success() {
+        let label = if cfg.is_ollama() { "Ollama error" } else { "Server error" };
+        return Err(format!("{} ({})", label, error_text(response).await));
+    }
+
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
+    let mut text = String::new();
+    let mut pieces: u32 = 0;
+    let mut reported_tokens: Option<u32> = None;
+    let mut reported_ms: Option<u64> = None;
+    let mut first_piece_at: Option<Instant> = None;
+    let mut cancelled = false;
+    let mut finished = false;
+
+    'outer: loop {
+        // Wake up regularly so a cancel request is noticed even while the
+        // server is silent (for example while it loads a model).
+        let next = match tokio::time::timeout(Duration::from_millis(250), stream.next()).await {
+            Ok(item) => item,
+            Err(_) => {
+                if cancel.load(Ordering::Relaxed) {
+                    cancelled = true;
+                    break;
+                }
+                continue;
+            }
+        };
+
+        let chunk = match next {
+            Some(chunk) => chunk,
+            None => break,
+        };
+
+        if cancel.load(Ordering::Relaxed) {
+            cancelled = true;
+            break;
+        }
+
+        let chunk = chunk.map_err(|e| format!("Connection interrupted: {}", e))?;
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+        while let Some(position) = buffer.find('\n') {
+            let line: String = buffer.drain(..=position).collect();
+            let line = line.trim();
+
+            // Server-sent events prefix each JSON object with "data:".
+            let line = line.strip_prefix("data:").map(str::trim).unwrap_or(line);
+
+            if line.is_empty() || line.starts_with(':') {
+                continue;
+            }
+
+            if line == "[DONE]" {
+                finished = true;
+                break 'outer;
+            }
+
+            let value: Value = match serde_json::from_str(line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            if let Some(message) = value["error"].as_str() {
+                return Err(format!("Server error: {}", message));
+            }
+
+            if let Some(message) = value["error"]["message"].as_str() {
+                return Err(format!("Server error: {}", message));
+            }
+
+            let piece = if cfg.is_ollama() {
+                value["message"]["content"].as_str().unwrap_or("")
+            } else {
+                value["choices"][0]["delta"]["content"]
+                    .as_str()
+                    .or_else(|| value["choices"][0]["text"].as_str())
+                    .unwrap_or("")
+            };
+
+            if !piece.is_empty() {
+                if first_piece_at.is_none() {
+                    first_piece_at = Some(Instant::now());
+                }
+
+                pieces += 1;
+                text.push_str(piece);
+                on_chunk(piece);
+            }
+
+            if cfg.is_ollama() {
+                if value["done"].as_bool().unwrap_or(false) {
+                    reported_tokens = value["eval_count"].as_u64().map(|n| n as u32);
+                    reported_ms = value["eval_duration"]
+                        .as_u64()
+                        .filter(|ns| *ns > 0)
+                        .map(|ns| ns / 1_000_000);
+                    finished = true;
+                }
+            } else {
+                if let Some(n) = value["usage"]["completion_tokens"].as_u64() {
+                    reported_tokens = Some(n as u32);
+                }
+
+                if let Some(ms) = value["timings"]["predicted_ms"].as_f64() {
+                    if ms > 0.0 {
+                        reported_ms = Some(ms.round() as u64);
+                    }
+                }
+            }
+        }
+
+        if finished && cfg.is_ollama() {
+            break;
+        }
+    }
+
+    // Wall-clock fallback: time from the first token to the end.
+    let measured_ms = first_piece_at
+        .map(|t| t.elapsed().as_millis() as u64)
+        .unwrap_or_else(|| started.elapsed().as_millis() as u64)
+        .max(1);
+
+    Ok(GenerateOutput {
+        tokens: reported_tokens.unwrap_or(pieces),
+        generation_time: reported_ms.unwrap_or(measured_ms),
+        text,
+        cancelled,
     })
 }
 

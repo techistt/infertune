@@ -30,15 +30,36 @@ switch between them at any time.
 ## Features
 
 - **Dashboard:** live CPU, RAM, GPU and VRAM (NVIDIA via NVML, AMD via `rocm-smi`, Intel via Windows GPU counters), multi-GPU selection, GPU and model recommendations with a score breakdown.
-- **Playground:** chat with temperature, top-p, top-k, max tokens, seed and context length (capped to the model's real limit). Shows token count and tokens/second. Ctrl+Enter to send.
+- **Playground:** chat with streaming replies and a Stop button, temperature, top-p, top-k, max tokens, seed and context length (capped to the model's real limit). Optional conversation mode keeps earlier turns. A prompt library holds built-in and saved prompts (import/export as JSON). Ollama users can also set how many layers run on the GPU. Shows token count and tokens/second. Ctrl+Enter to send.
 - **GPU memory guard:** before you run a model, InferTune compares its estimated memory need at your chosen context with the VRAM that is actually free. It warns when loading may crash the server, explains when part of the model will run on the CPU, and suggests the largest context length that still fits fully on your GPU.
 - **Friendly errors:** common failures (GPU out of memory, server crash, model not found, server unreachable, timeouts, bad API key) come with a plain-language tip next to the raw error.
 - **Models:** every installed model with parameters, quantization, size, estimated VRAM and RAM at your context length, and a fit rating (GPU / partial offload / CPU / too large). Ollama users can download and remove models, with live progress.
+- **Discover models:** a curated list of popular Ollama models sorted by how well they should fit your GPU and RAM, with one-click download.
 - **Compare:** send one prompt to 2–4 models and read the answers side by side, with speed and time for each. Models run one at a time so they do not fight over GPU memory.
-- **Benchmarks:** run one or more models through a preset or custom prompt for several runs with fixed settings. Records tokens/second, time, and peak CPU / RAM / GPU / VRAM. Shows a speed chart, and results can be copied as Markdown (for forums and docs) or CSV.
-- **Sessions:** every Playground and Compare generation is saved. Search, review the full settings and response, reopen in the Playground, copy as JSON or delete.
+- **Benchmarks:** run one or more models through a preset or custom prompt for several runs with fixed settings. Records tokens/second, time, peak CPU / RAM / GPU / VRAM, GPU temperature and (NVIDIA) power draw with tokens per joule. Shows a speed chart and a trend over time per model. Results can be copied as Markdown or CSV, or exported as a standalone HTML report (print it to PDF).
+- **Quality check:** asks a model 12 short questions (math, logic, knowledge, instruction following, code) at temperature 0 and grades them automatically, so you can see what a smaller or more compressed model gives up. A quick sanity check, not a full benchmark.
+- **Auto-tune:** tries several context sizes (and, on Ollama, GPU layer splits) for one model, measures each, and highlights the fastest and a balanced option you can apply with one click. Settings that run out of memory are marked as failed.
+- **Fine-tune estimator:** a calculator for the GPU memory needed to fine-tune a model with QLoRA, LoRA or full fine-tuning. It does not train anything.
+- **Sessions:** every Playground and Compare generation is saved. Search, review the full settings and response, reopen in the Playground, copy as JSON or delete. Pick two sessions to compare their settings and see a word-level diff of the responses.
 - **Logs:** in-app log of connections, errors, downloads and benchmarks, with level filter, search and copy.
-- **Settings:** manage servers, API keys, refresh interval, and stored data.
+- **Settings:** manage servers, API keys, refresh interval, notifications, tray behaviour, the local API server, and stored data.
+- **Desktop:** a tray icon (click to bring the window back; optional "keep running in the tray" on close) and a notification when a long job finishes while the window is in the background.
+
+### Local API server
+
+Settings has a **Local API server** switch. When on, InferTune listens on
+`http://127.0.0.1:<port>/v1` (default port 11500, this computer only) and
+forwards OpenAI-style requests, including streaming, to the server that was
+active when you pressed Start. Other tools can then use one stable address,
+with an optional access token:
+
+```
+curl http://127.0.0.1:11500/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_TOKEN" -H "Content-Type: application/json" \
+  -d '{"model":"llama3.2:3b","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+Stop and start it again after switching servers. `GET /health` answers without a token.
 
 ### Ollama vs other servers
 
@@ -98,7 +119,7 @@ The installer can still be built by the GitHub Actions workflow (push a `v*` tag
 ## Releasing
 
 1. Bump the version in `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`.
-2. Commit, then tag and push: `git tag v0.3.0 && git push origin v0.3.0`.
+2. Commit, then tag and push: `git tag v0.4.0 && git push origin v0.4.0`.
 3. The **Build InferTune** workflow builds the Windows installer and attaches it to a draft GitHub release.
 
 The release workflow runs the type-check and both test suites first. Installers are unsigned. Windows SmartScreen will warn on first run until the

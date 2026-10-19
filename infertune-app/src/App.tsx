@@ -5,10 +5,16 @@ import Playground from "./pages/Playground";
 import Models from "./pages/Models";
 import Benchmarks from "./pages/Benchmarks";
 import Compare from "./pages/Compare";
+import Quality from "./pages/Quality";
+import AutoTune from "./pages/AutoTune";
+import FineTune from "./pages/FineTune";
 import Sessions from "./pages/Sessions";
 import Logs from "./pages/Logs";
 import Settings from "./pages/Settings";
+import { useEffect } from "react";
 import { useAppStore } from "./store/useAppStore";
+import { useSettingsStore } from "./store/settingsStore";
+import { setCloseToTray } from "./services/apiService";
 import { useHardwarePolling } from "./hooks/useHardwarePolling";
 import { useProviderStatus } from "./hooks/useProviderStatus";
 
@@ -18,6 +24,11 @@ function App() {
   useProviderStatus();
 
   const page = useAppStore((s) => s.page);
+  const closeToTray = useSettingsStore((s) => s.closeToTray);
+
+  useEffect(() => {
+    setCloseToTray(closeToTray);
+  }, [closeToTray]);
 
   return (
     <div className="flex h-screen bg-gray-950 text-white overflow-hidden">
@@ -32,6 +43,9 @@ function App() {
           {page === "models" && <Models />}
           {page === "benchmarks" && <Benchmarks />}
           {page === "compare" && <Compare />}
+          {page === "quality" && <Quality />}
+          {page === "autotune" && <AutoTune />}
+          {page === "finetune" && <FineTune />}
           {page === "sessions" && <Sessions />}
           {page === "logs" && <Logs />}
           {page === "settings" && <Settings />}

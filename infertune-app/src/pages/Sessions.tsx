@@ -3,6 +3,7 @@ import { Trash2 } from "lucide-react";
 import { useHistoryStore } from "../store/historyStore";
 import { useAppStore } from "../store/useAppStore";
 import { formatDateTime, formatDuration } from "../utils/format";
+import SessionCompare from "../components/SessionCompare";
 
 export default function Sessions() {
   const sessions = useHistoryStore((s) => s.sessions);
@@ -14,6 +15,8 @@ export default function Sessions() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [compareMode, setCompareMode] = useState(false);
+  const [picked, setPicked] = useState<string[]>([]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -30,6 +33,24 @@ export default function Sessions() {
 
   const selected =
     sessions.find((s) => s.id === selectedId) ?? filtered[0] ?? null;
+
+  const pickedSessions = picked
+    .map((id) => sessions.find((s) => s.id === id))
+    .filter((s): s is NonNullable<typeof s> => Boolean(s));
+
+  const clickSession = (id: string) => {
+    if (!compareMode) {
+      setSelectedId(id);
+      return;
+    }
+
+    // Keep the two most recent picks.
+    setPicked((current) =>
+      current.includes(id)
+        ? current.filter((x) => x !== id)
+        : [...current, id].slice(-2)
+    );
+  };
 
   const copyJson = async () => {
     if (!selected) return;
@@ -63,6 +84,19 @@ export default function Sessions() {
             placeholder="Search sessions..."
             className="flex-1 min-w-0 rounded-lg bg-gray-800 p-2 outline-none"
           />
+
+          <button
+            onClick={() => {
+              setCompareMode((on) => !on);
+              setPicked([]);
+            }}
+            aria-pressed={compareMode}
+            className={`rounded-lg px-3 py-2 whitespace-nowrap ${
+              compareMode ? "bg-blue-600" : "bg-gray-800 text-gray-300 hover:text-white"
+            }`}
+          >
+            Compare
+          </button>
 
           {confirmClear ? (
             <>
@@ -103,9 +137,9 @@ export default function Sessions() {
           {filtered.map((s) => (
             <button
               key={s.id}
-              onClick={() => setSelectedId(s.id)}
+              onClick={() => clickSession(s.id)}
               className={`w-full rounded-lg p-3 text-left ${
-                selected?.id === s.id
+                (compareMode ? picked.includes(s.id) : selected?.id === s.id)
                   ? "bg-blue-900/40 border border-blue-700"
                   : "bg-gray-800 border border-transparent hover:bg-gray-700"
               }`}
@@ -125,7 +159,20 @@ export default function Sessions() {
       </div>
 
       <div className="col-span-12 lg:col-span-8 rounded-xl border border-gray-800 bg-gray-900 p-5 lg:h-[calc(100vh-8rem)] overflow-y-auto">
-        {selected ? (
+        {compareMode ? (
+          pickedSessions.length === 2 ? (
+            <SessionCompare a={pickedSessions[0]} b={pickedSessions[1]} />
+          ) : (
+            <div className="py-12 text-center text-gray-400">
+              <p className="font-medium text-gray-300">Compare two sessions</p>
+              <p className="mt-2 text-sm">
+                Click two sessions in the list ({pickedSessions.length} of 2
+                picked). You will see the settings that differ and the
+                differences between the responses.
+              </p>
+            </div>
+          )
+        ) : selected ? (
           <>
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
