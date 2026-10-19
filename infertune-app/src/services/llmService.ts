@@ -4,10 +4,18 @@ import type {
   GenerateRequest,
   GenerateResponse,
 } from "../types/llm";
+import type { ProviderConfig } from "../types/provider";
+import { getActiveConfig } from "../store/settingsStore";
 
 
+/**
+ * Runs one generation on the given server (the active one by default).
+ * Rejects with a readable message when the server cannot be reached or
+ * returns an error.
+ */
 export async function generateText(
-  request: GenerateRequest
+  request: GenerateRequest,
+  provider: ProviderConfig = getActiveConfig()
 ): Promise<GenerateResponse> {
 
   const response = await invoke<{
@@ -15,8 +23,10 @@ export async function generateText(
     tokens: number;
     generation_time: number;
   }>(
-    "generate_text",
+    "provider_generate",
     {
+      provider,
+
       model: request.model,
       systemPrompt: request.systemPrompt,
       userPrompt: request.userPrompt,

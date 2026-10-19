@@ -6,19 +6,25 @@ import {
   FolderOpen,
   Settings,
   FileText,
+  type LucideIcon,
 } from "lucide-react";
+import pkg from "../../package.json";
+import { useAppStore, type Page } from "../store/useAppStore";
 
-const menu = [
-  { icon: LayoutDashboard, label: "Dashboard" },
-  { icon: Bot, label: "Playground" },
-  { icon: Boxes, label: "Models" },
-  { icon: BarChart3, label: "Benchmarks" },
-  { icon: FolderOpen, label: "Sessions" },
-  { icon: FileText, label: "Logs" },
-  { icon: Settings, label: "Settings" },
+const menu: { icon: LucideIcon; label: string; page: Page }[] = [
+  { icon: LayoutDashboard, label: "Dashboard", page: "dashboard" },
+  { icon: Bot, label: "Playground", page: "playground" },
+  { icon: Boxes, label: "Models", page: "models" },
+  { icon: BarChart3, label: "Benchmarks", page: "benchmarks" },
+  { icon: FolderOpen, label: "Sessions", page: "sessions" },
+  { icon: FileText, label: "Logs", page: "logs" },
+  { icon: Settings, label: "Settings", page: "settings" },
 ];
 
 export default function Sidebar() {
+  const page = useAppStore((s) => s.page);
+  const setPage = useAppStore((s) => s.setPage);
+
   return (
     <aside className="w-64 shrink-0 bg-gray-950 border-r border-gray-800 flex flex-col">
       <div className="p-6 border-b border-gray-800">
@@ -36,35 +42,30 @@ export default function Sidebar() {
         </p>
       </div>
 
-      <nav className="flex-1 p-4 space-y-2">
-        {menu.map(({ icon: Icon, label }, index) => {
-          const active = index === 0;
+      <nav className="flex-1 p-4 space-y-2 overflow-y-auto">
+        {menu.map(({ icon: Icon, label, page: target }) => {
+          const active = page === target;
 
           return (
             <button
               key={label}
-              disabled={!active}
+              onClick={() => setPage(target)}
               aria-current={active ? "page" : undefined}
               className={`flex items-center gap-3 w-full rounded-lg px-4 py-3 transition ${
                 active
                   ? "bg-gray-800 text-white"
-                  : "text-gray-500 cursor-not-allowed"
+                  : "text-gray-400 hover:bg-gray-900 hover:text-white"
               }`}
             >
               <Icon size={20} />
               <span className="flex-1 text-left">{label}</span>
-              {!active && (
-                <span className="text-[10px] uppercase tracking-wide text-gray-600">
-                  Soon
-                </span>
-              )}
             </button>
           );
         })}
       </nav>
 
       <div className="border-t border-gray-800 p-4 text-xs text-gray-500">
-        InferTune v0.1.0
+        InferTune v{pkg.version}
       </div>
     </aside>
   );

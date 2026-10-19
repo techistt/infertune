@@ -1,7 +1,7 @@
 {
   "name": "infertune-app",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Hardware-aware tuning studio for local LLMs",
   "type": "module",
   "scripts": {

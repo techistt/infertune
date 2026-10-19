@@ -1,72 +1,42 @@
-import { Cpu, MemoryStick, Clock3, Monitor } from "lucide-react";
-import { useAppStore } from "../store/useAppStore";
-import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useState } from "react";
+import { Cpu, MemoryStick, Monitor, Server } from "lucide-react";
+import { useAppStore, type Page } from "../store/useAppStore";
+import { useActiveProfile } from "../store/settingsStore";
 
+const TITLES: Record<Page, string> = {
+  dashboard: "Dashboard",
+  playground: "Playground",
+  models: "Models",
+  benchmarks: "Benchmarks",
+  sessions: "Sessions",
+  logs: "Logs",
+  settings: "Settings",
+};
 
 export default function Header() {
+  const page = useAppStore((s) => s.page);
+  const model = useAppStore((s) => s.model);
+  const hardware = useAppStore((s) => s.hardware);
+  const gpuStats = useAppStore((s) => s.gpuStats);
+  const online = useAppStore((s) => s.providerOnline);
+  const setPage = useAppStore((s) => s.setPage);
 
-  const {
-    model,
-    hardware,
-    gpuStats
-  } = useAppStore();
-
-  const [ollamaOnline, setOllamaOnline] = useState(false);
-
-  useEffect(() => {
-
-    const updateStats = async () => {
-
-      try {
-
-        const ollamaStatus = await invoke<boolean>(
-          "check_ollama_status"
-        );
-
-        setOllamaOnline(ollamaStatus);
-
-
-      } catch (error) {
-
-        console.error(
-          "Monitoring update failed:",
-          error
-        );
-
-      }
-
-    };
-
-    updateStats();
-
-    const interval = setInterval(
-      updateStats,
-      2000
-    );
-
-
-    return () => clearInterval(interval);
-
-  }, []);
-
+  const provider = useActiveProfile();
 
   const ramPercentage =
     hardware.ram_total > 0
       ? ((hardware.ram_used / hardware.ram_total) * 100).toFixed(1)
       : "0";
 
-
   return (
-    <header className="h-16 border-b border-gray-800 bg-gray-900 px-6 flex items-center justify-between">
+    <header className="h-16 shrink-0 border-b border-gray-800 bg-gray-900 px-6 flex items-center justify-between gap-4">
 
-      <div>
+      <div className="min-w-0">
         <h2 className="text-lg font-semibold">
-          Dashboard
+          {TITLES[page]}
         </h2>
 
-        <p className="text-sm text-gray-400">
-          Active Model: {model}
+        <p className="text-sm text-gray-400 truncate">
+          Active model: {model || "none selected"}
         </p>
       </div>
 
@@ -83,11 +53,9 @@ export default function Header() {
 
         <div className="flex items-center gap-2">
           <MemoryStick size={18} />
-
           <span>
             RAM {ramPercentage}%
           </span>
-
         </div>
 
         <div className="flex items-center gap-2">
@@ -101,21 +69,28 @@ export default function Header() {
             {gpuStats.temperature}°C
           </span>
 
-          <span className="text-gray-500">
+          <span className="text-gray-500 hidden xl:inline">
             {gpuStats.backend}
           </span>
         </div>
 
-        <div className="flex items-center gap-2">
-          <Clock3 size={18} />
+        <button
+          onClick={() => setPage("settings")}
+          title="Change server in Settings"
+          className="flex items-center gap-2 rounded-lg px-2 py-1 hover:bg-gray-800 transition"
+        >
+          <Server size={18} />
+
+          <span
+            className={`inline-block h-2 w-2 rounded-full ${
+              online ? "bg-green-500" : "bg-red-500"
+            }`}
+          />
 
           <span>
-            {ollamaOnline
-              ? "Ollama Online"
-              : "Ollama Offline"}
+            {provider.name} {online ? "online" : "offline"}
           </span>
-
-        </div>
+        </button>
 
       </div>
 

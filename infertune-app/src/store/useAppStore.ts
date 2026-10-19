@@ -1,12 +1,22 @@
 import { create } from "zustand";
+import type { SessionRecord } from "./historyStore";
 
-interface HardwareStats {
+export type Page =
+  | "dashboard"
+  | "playground"
+  | "models"
+  | "benchmarks"
+  | "sessions"
+  | "logs"
+  | "settings";
+
+export interface HardwareStats {
   cpu_usage: number;
   ram_used: number;
   ram_total: number;
 }
 
-interface GpuStats {
+export interface GpuStats {
   name: string;
   vendor: string;
   usage: number;
@@ -16,16 +26,26 @@ interface GpuStats {
   temperature: number;
 }
 
-interface ModelRanking {
+export interface ModelRanking {
   name: string;
   family: string;
   purpose: string;
+  parameters: number | null;
+  quantization: string | null;
   size_gb: number;
+  estimated_vram_gb: number;
+  estimated_ram_gb: number;
   score: number;
   reasons: string[];
 }
 
 interface AppState {
+  page: Page;
+  setPage: (page: Page) => void;
+
+  providerOnline: boolean;
+  setProviderOnline: (online: boolean) => void;
+
   model: string;
   temperature: number;
   topP: number;
@@ -59,39 +79,36 @@ interface AppState {
 
   setResponse: (value: string) => void;
 
-  setMetrics: (
-    tokens: number,
-    generationTime: number
-  ) => void;
+  setMetrics: (tokens: number, generationTime: number) => void;
 
   setSelectedGpu: (id: number) => void;
 
-  setSelectedGpuInfo: (
-    name: string,
-    vendor: string
-  ) => void;
+  setSelectedGpuInfo: (name: string, vendor: string) => void;
 
   hardware: HardwareStats;
 
   gpuStats: GpuStats;
 
-  setHardware: (
-    stats: HardwareStats
-  ) => void;
+  setHardware: (stats: HardwareStats) => void;
 
-  setGpuStats: (
-    stats: GpuStats
-  ) => void;
+  setGpuStats: (stats: GpuStats) => void;
 
   rankings: ModelRanking[];
 
-  setRankings: (
-    models: ModelRanking[]
-  ) => void;
+  setRankings: (models: ModelRanking[]) => void;
+
+  /** Restores a saved session into the Playground. */
+  loadSession: (session: SessionRecord) => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
-  model: "hermes3:latest",
+  page: "dashboard",
+  setPage: (page) => set({ page }),
+
+  providerOnline: false,
+  setProviderOnline: (providerOnline) => set({ providerOnline }),
+
+  model: "",
   temperature: 0.7,
   topP: 0.9,
   topK: 40,
@@ -143,49 +160,57 @@ export const useAppStore = create<AppState>((set) => ({
 
   setResponse: (response) => set({ response }),
 
-  setMetrics: (
-    tokens,
-    generationTime
-  ) =>
+  setMetrics: (tokens, generationTime) =>
     set({
       tokens,
       generationTime,
       tokensPerSecond:
         generationTime > 0
-          ? Number(
-            (
-              tokens /
-              (generationTime / 1000)
-            ).toFixed(2)
-          )
+          ? Number((tokens / (generationTime / 1000)).toFixed(2))
           : 0,
     }),
 
   setSelectedGpu: (id) =>
     set({
-      selectedGpu: id
+      selectedGpu: id,
     }),
 
   setSelectedGpuInfo: (name, vendor) =>
     set({
       selectedGpuName: name,
-      selectedGpuVendor: vendor
+      selectedGpuVendor: vendor,
     }),
 
   setHardware: (stats) =>
     set({
-      hardware: stats
+      hardware: stats,
     }),
-
 
   setGpuStats: (stats) =>
     set({
-      gpuStats: stats
+      gpuStats: stats,
     }),
 
   setRankings: (models) =>
     set({
-      rankings: models
+      rankings: models,
     }),
 
+  loadSession: (session) =>
+    set({
+      page: "playground",
+      model: session.model,
+      temperature: session.temperature,
+      topP: session.topP,
+      topK: session.topK,
+      maxTokens: session.maxTokens,
+      seed: session.seed,
+      contextLength: session.contextLength,
+      systemPrompt: session.systemPrompt,
+      userPrompt: session.userPrompt,
+      response: session.response,
+      tokens: session.tokens,
+      generationTime: session.generationTime,
+      tokensPerSecond: session.tokensPerSecond,
+    }),
 }));

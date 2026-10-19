@@ -1,35 +1,20 @@
-import { useEffect, useState } from "react";
-import { getModels, getModelContextLimit } from "../services/modelService";
+import { useCallback, useEffect, useState } from "react";
+import { RefreshCw } from "lucide-react";
+import { getModelContextLimit, listModels } from "../services/modelService";
 import { useAppStore } from "../store/useAppStore";
+import { useActiveProfile } from "../store/settingsStore";
+import { toConfig } from "../types/provider";
+import { logger, errorMessage } from "../store/logStore";
+import ContextSelect from "./ContextSelect";
 
 export default function ParameterPanel() {
   const [models, setModels] = useState<string[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
   const [contextLimit, setContextLimit] = useState<number | null>(null);
-  useEffect(() => {
 
-    async function loadModels() {
+  const profile = useActiveProfile();
 
-      try {
-        const result = await getModels();
-
-        setModels(result);
-
-        if (result.length > 0) {
-          setModel(result[0]);
-        }
-
-      } catch (error) {
-        console.error(
-          "Failed to load models:",
-          error
-        );
-      }
-    }
-
-
-    loadModels();
-
-  }, []);
   const {
     model,
     temperature,
@@ -48,11 +33,46 @@ export default function ParameterPanel() {
     setContextLength,
   } = useAppStore();
 
-  // Offer only context sizes the selected model supports.
+  const loadModels = useCallback(async () => {
+    setLoading(true);
+    setLoadError(null);
+
+    try {
+      const result = await listModels(toConfig(profile));
+      const names = result.map((m) => m.name);
+
+      setModels(names);
+
+      // Keep the current selection when it still exists on this server.
+      const current = useAppStore.getState().model;
+
+      if (names.length > 0 && !names.includes(current)) {
+        setModel(names[0]);
+      }
+    } catch (error) {
+      setModels([]);
+      setLoadError(errorMessage(error));
+      logger.warn("models", `Could not list models: ${errorMessage(error)}`);
+    } finally {
+      setLoading(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile.id, profile.kind, profile.baseUrl, profile.apiKey]);
+
+  useEffect(() => {
+    loadModels();
+  }, [loadModels]);
+
+  // Offer only context sizes the selected model supports (Ollama reports this).
   useEffect(() => {
     let cancelled = false;
 
-    getModelContextLimit(model).then((limit) => {
+    if (!model) {
+      setContextLimit(null);
+      return;
+    }
+
+    getModelContextLimit(model, toConfig(profile)).then((limit) => {
       if (cancelled) return;
 
       setContextLimit(limit);
@@ -65,20 +85,10 @@ export default function ParameterPanel() {
     return () => {
       cancelled = true;
     };
-  }, [model]);
-
-  const contextOptions = [2048, 4096, 8192, 16384, 32768, 65536, 131072].filter(
-    (n) => contextLimit === null || n <= contextLimit
-  );
-
-  // Make sure the current value is always selectable (e.g. a limit of 40960).
-  if (!contextOptions.includes(contextLength)) {
-    contextOptions.push(contextLength);
-    contextOptions.sort((a, b) => a - b);
-  }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [model, profile.id, profile.baseUrl]);
 
   const resetValues = () => {
-    setModel("hermes3:latest");
     setTemperature(0.7);
     setTopP(0.9);
     setTopK(40);
@@ -96,13 +106,33 @@ export default function ParameterPanel() {
       <div className="space-y-5">
 
         <div>
-          <label className="block text-sm mb-2">Model</label>
+          <div className="flex items-center justify-between mb-2">
+            <label className="text-sm">
+              Model <span className="text-gray-500">({profile.name})</span>
+            </label>
+
+            <button
+              onClick={loadModels}
+              disabled={loading}
+              title="Reload models"
+              className="text-gray-400 hover:text-white disabled:opacity-50"
+            >
+              <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
+            </button>
+          </div>
 
           <select
             value={model}
             onChange={(e) => setModel(e.target.value)}
+            disabled={models.length === 0}
             className="w-full rounded-lg bg-gray-800 p-2"
           >
+            {models.length === 0 && (
+              <option value="">
+                {loading ? "Loading..." : "No models available"}
+              </option>
+            )}
+
             {models.map((modelName) => (
               <option
                 key={modelName}
@@ -112,6 +142,12 @@ export default function ParameterPanel() {
               </option>
             ))}
           </select>
+
+          {loadError && (
+            <p className="mt-2 text-xs text-red-400 break-words">
+              {loadError}
+            </p>
+          )}
         </div>
 
         <div>
@@ -176,23 +212,19 @@ export default function ParameterPanel() {
             <span>{contextLength.toLocaleString()}</span>
           </div>
 
-          <select
+          <ContextSelect
             value={contextLength}
-            onChange={(e) => setContextLength(Number(e.target.value))}
-            className="w-full rounded-lg bg-gray-800 p-2"
-          >
-            {contextOptions.map((n) => (
-              <option key={n} value={n}>
-                {n.toLocaleString()} tokens
-              </option>
-            ))}
-          </select>
+            onChange={setContextLength}
+            limit={contextLimit}
+          />
 
           <p className="text-xs text-gray-400 mt-1">
             {contextLimit !== null
               ? `Model supports up to ${contextLimit.toLocaleString()} tokens. `
               : ""}
             Larger context uses more memory (KV cache).
+            {!profile.kind.startsWith("ollama") &&
+              " This server fixes its context size when it starts, so this only affects estimates."}
           </p>
         </div>
 
@@ -207,16 +239,10 @@ export default function ParameterPanel() {
           />
         </div>
 
-        <div className="flex gap-3 pt-2">
-          <button
-            className="flex-1 rounded-lg bg-blue-600 py-2 hover:bg-blue-700"
-          >
-            Apply
-          </button>
-
+        <div className="pt-2">
           <button
             onClick={resetValues}
-            className="flex-1 rounded-lg bg-gray-700 py-2 hover:bg-gray-600"
+            className="w-full rounded-lg bg-gray-700 py-2 hover:bg-gray-600"
           >
             Reset
           </button>

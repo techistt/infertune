@@ -7,6 +7,10 @@ use sysinfo::System;
 
 use nvml_wrapper::Nvml;
 
+mod providers;
+use providers::{GenerateParams, ProviderConfig};
+use tauri::Emitter;
+
 use std::os::windows::process::CommandExt;
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_DESC1, DXGI_ADAPTER_FLAG_SOFTWARE,
@@ -115,40 +119,10 @@ struct ModelRecommendation {
 }
 
 #[derive(Serialize)]
-struct OllamaRequest {
-    model: String,
-    prompt: String,
-    stream: bool,
-    options: OllamaOptions,
-}
-
-#[derive(Serialize)]
-struct OllamaOptions {
-    temperature: f32,
-    top_p: f32,
-    top_k: u32,
-    seed: u32,
-    num_predict: u32,
-    num_ctx: u32,
-}
-
-#[derive(Deserialize)]
-struct OllamaResponse {
-    response: String,
-    eval_count: Option<u32>,
-    eval_duration: Option<u64>,
-}
-
-#[derive(Serialize)]
 struct GenerateResponse {
     text: String,
     tokens: u32,
     generation_time: u64,
-}
-
-#[derive(Deserialize)]
-struct OllamaTags {
-    models: Vec<OllamaModel>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -176,7 +150,11 @@ struct ModelRanking {
     name: String,
     family: String,
     purpose: String,
+    parameters: Option<f32>,
+    quantization: Option<String>,
     size_gb: f32,
+    estimated_vram_gb: f32,
+    estimated_ram_gb: f32,
     score: u32,
     reasons: Vec<String>,
 }
@@ -586,7 +564,10 @@ async fn recommend_model(
     vendor: String,
     task: String,
     context: Option<u64>,
+    provider: Option<ProviderConfig>,
 ) -> ModelRecommendation {
+    let provider = provider.unwrap_or_default();
+
     let ram_gb = ram_total as f32 / 1024.0 / 1024.0 / 1024.0;
     let vram_gb = gpu_memory as f32 / 1024.0 / 1024.0 / 1024.0;
 
@@ -598,8 +579,8 @@ async fn recommend_model(
         _ => TaskType::General,
     };
 
-    // Get installed Ollama models
-    let installed = match get_installed_models().await {
+    // Get the models installed on the active provider
+    let installed = match get_installed_models(&provider).await {
         Ok(models) => models,
         Err(_) => {
             return ModelRecommendation {
@@ -613,7 +594,16 @@ async fn recommend_model(
     };
 
     // Parse and score every model
-    let mut scored = score_installed(&installed, ram_gb, vram_gb, &vendor, &task_type, context.unwrap_or(DEFAULT_CONTEXT)).await;
+    let mut scored = score_installed(
+        &provider,
+        &installed,
+        ram_gb,
+        vram_gb,
+        &vendor,
+        &task_type,
+        context.unwrap_or(DEFAULT_CONTEXT),
+    )
+    .await;
 
     // No models installed
     if scored.is_empty() {
@@ -659,6 +649,7 @@ async fn recommend_model(
 }
 
 async fn score_installed(
+    provider: &ProviderConfig,
     installed: &[OllamaModel],
     ram_gb: f32,
     vram_gb: f32,
@@ -669,7 +660,13 @@ async fn score_installed(
     let mut scored = Vec::with_capacity(installed.len());
 
     for model in installed {
-        let meta = fetch_model_meta(&model.name).await;
+        // Only Ollama exposes layer/KV-cache details; other servers fall back
+        // to estimating from the model name.
+        let meta = if provider.is_ollama() {
+            fetch_model_meta(&provider.root(), &model.name).await
+        } else {
+            None
+        };
         let parsed = parse_model(model, meta, context);
         scored.push(score_model(&parsed, ram_gb, vram_gb, vendor, task));
     }
@@ -693,10 +690,28 @@ fn family_bonus(family: &str) -> u32 {
     }
 }
 
-/// Largest context length the model supports (None if unknown / Ollama down).
+/// Largest context length the model supports (None if unknown / unsupported).
 #[tauri::command]
-async fn get_model_context_limit(model: String) -> Option<u64> {
-    fetch_model_meta(&model).await?.max_context
+async fn get_model_context_limit(model: String, provider: Option<ProviderConfig>) -> Option<u64> {
+    let provider = provider.unwrap_or_default();
+
+    if !provider.is_ollama() {
+        return None;
+    }
+
+    fetch_model_meta(&provider.root(), &model).await?.max_context
+}
+
+/// Parameter count, quantization, context limit and KV-cache cost of a model.
+#[tauri::command]
+async fn get_model_details(model: String, provider: Option<ProviderConfig>) -> Option<ModelMeta> {
+    let provider = provider.unwrap_or_default();
+
+    if !provider.is_ollama() {
+        return None;
+    }
+
+    fetch_model_meta(&provider.root(), &model).await
 }
 
 #[tauri::command]
@@ -803,21 +818,27 @@ async fn get_gpu_stats(id: u32) -> Result<GpuStats, String> {
 }
 
 #[tauri::command]
-async fn get_models() -> Vec<String> {
-    match get_installed_models().await {
-        Ok(models) => models.into_iter().map(|m| m.name).collect(),
-        Err(_) => Vec::new(),
-    }
+async fn provider_models(
+    provider: Option<ProviderConfig>,
+) -> Result<Vec<providers::ModelEntry>, String> {
+    providers::list_models(&provider.unwrap_or_default()).await
 }
 
-async fn get_installed_models() -> Result<Vec<OllamaModel>, String> {
-    let response = reqwest::get("http://localhost:11434/api/tags")
-        .await
-        .map_err(|e| e.to_string())?;
+#[tauri::command]
+async fn provider_status(provider: Option<ProviderConfig>) -> bool {
+    providers::status(&provider.unwrap_or_default()).await
+}
 
-    let data: OllamaTags = response.json().await.map_err(|e| e.to_string())?;
+async fn get_installed_models(provider: &ProviderConfig) -> Result<Vec<OllamaModel>, String> {
+    let models = providers::list_models(provider).await?;
 
-    Ok(data.models)
+    Ok(models
+        .into_iter()
+        .map(|m| OllamaModel {
+            name: m.name,
+            size: m.size,
+        })
+        .collect())
 }
 
 fn detect_family(name: &str) -> String {
@@ -922,7 +943,7 @@ fn quantization_bonus(quant: Option<&str>) -> u32 {
 const DEFAULT_CONTEXT: u64 = 4096;
 
 /// Extra metadata read from Ollama's `/api/show`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 struct ModelMeta {
     parameters_b: Option<f32>,
     quantization: Option<String>,
@@ -942,25 +963,26 @@ fn json_u64(value: &serde_json::Value) -> Option<u64> {
 static META_CACHE: OnceLock<Mutex<HashMap<String, ModelMeta>>> = OnceLock::new();
 
 /// Cached wrapper: model metadata never changes, so ask Ollama once per model.
-async fn fetch_model_meta(name: &str) -> Option<ModelMeta> {
+async fn fetch_model_meta(base_url: &str, name: &str) -> Option<ModelMeta> {
     let cache = META_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = format!("{}|{}", base_url, name);
 
-    if let Some(meta) = cache.lock().ok()?.get(name) {
+    if let Some(meta) = cache.lock().ok()?.get(&key) {
         return Some(meta.clone());
     }
 
-    let meta = fetch_model_meta_uncached(name).await?;
+    let meta = fetch_model_meta_uncached(base_url, name).await?;
 
     if let Ok(mut guard) = cache.lock() {
-        guard.insert(name.to_string(), meta.clone());
+        guard.insert(key, meta.clone());
     }
 
     Some(meta)
 }
 
-async fn fetch_model_meta_uncached(name: &str) -> Option<ModelMeta> {
+async fn fetch_model_meta_uncached(base_url: &str, name: &str) -> Option<ModelMeta> {
     let response = reqwest::Client::new()
-        .post("http://localhost:11434/api/show")
+        .post(format!("{}/api/show", base_url))
         .json(&serde_json::json!({ "model": name, "name": name }))
         .send()
         .await
@@ -1002,22 +1024,45 @@ async fn fetch_model_meta_uncached(name: &str) -> Option<ModelMeta> {
     })
 }
 
+/// Approximate bytes per parameter for each GGUF quantization.
+fn bytes_per_param(quant: Option<&str>) -> f32 {
+    match quant {
+        Some("iq2_xxs") | Some("iq2_xs") | Some("q2_k") => 0.3,
+        Some("iq3_xxs") | Some("iq3_xs") | Some("q3_k_s") | Some("q3_k_m") | Some("q3_k_l") => 0.42,
+        Some("q4_0") | Some("q4_1") | Some("q4_k_s") | Some("q4_k_m") | Some("iq4_xs")
+        | Some("iq4_nl") => 0.58,
+        Some("q5_0") | Some("q5_1") | Some("q5_k_s") | Some("q5_k_m") => 0.7,
+        Some("q6_k") => 0.82,
+        Some("q8_0") => 1.06,
+        Some("f16") => 2.0,
+        Some("f32") => 4.0,
+        _ => 0.58,
+    }
+}
+
 /// Returns (estimated VRAM GB, estimated RAM GB) for running the model at
 /// `context` tokens: weights + KV cache + runtime buffers.
 fn estimate_memory(
     params: Option<f32>,
+    quant: Option<&str>,
     size_gb: f32,
     kv_bytes_per_token: Option<f64>,
     context: u64,
 ) -> (f32, f32) {
-    // The file Ollama downloaded *is* the weights, so use its real size.
-    let weights_gb = size_gb;
+    // The downloaded file *is* the weights, so use its real size. Servers that
+    // do not report sizes (llama.cpp, LM Studio, ...) are estimated from the
+    // parameter count instead.
+    let weights_gb = if size_gb > 0.0 {
+        size_gb
+    } else {
+        params.unwrap_or(7.0) * bytes_per_param(quant)
+    };
 
     let kv_gb = match kv_bytes_per_token {
         Some(bytes) => (bytes * context as f64 / 1024.0 / 1024.0 / 1024.0) as f32,
         None => {
             // Rough fallback: ~0.5 GB of KV cache per 4k context for an 8B model.
-            let p = params.unwrap_or(size_gb / 0.6);
+            let p = params.unwrap_or_else(|| (weights_gb / 0.6).max(1.0));
             0.5 * (p / 8.0).max(0.1) * (context as f32 / 4096.0)
         }
     };
@@ -1051,7 +1096,13 @@ fn parse_model(model: &OllamaModel, meta: Option<ModelMeta>, context: u64) -> Pa
     let size_gb = model.size as f32 / 1024.0 / 1024.0 / 1024.0;
 
     let (estimated_vram_gb, estimated_ram_gb) =
-        estimate_memory(parameters, size_gb, meta.kv_bytes_per_token, context);
+        estimate_memory(
+            parameters,
+            quantization.as_deref(),
+            size_gb,
+            meta.kv_bytes_per_token,
+            context,
+        );
 
     let purpose = if lower.contains("coder") || lower.contains("code") {
         "Coding"
@@ -1133,7 +1184,10 @@ async fn get_model_rankings(
     vendor: String,
     task: String,
     context: Option<u64>,
+    provider: Option<ProviderConfig>,
 ) -> Vec<ModelRanking> {
+    let provider = provider.unwrap_or_default();
+
     let ram_gb = ram_total as f32 / 1024.0 / 1024.0 / 1024.0;
 
     let vram_gb = gpu_memory as f32 / 1024.0 / 1024.0 / 1024.0;
@@ -1146,12 +1200,21 @@ async fn get_model_rankings(
         _ => TaskType::General,
     };
 
-    let installed = match get_installed_models().await {
+    let installed = match get_installed_models(&provider).await {
         Ok(models) => models,
         Err(_) => return Vec::new(),
     };
 
-    let mut scored = score_installed(&installed, ram_gb, vram_gb, &vendor, &task_type, context.unwrap_or(DEFAULT_CONTEXT)).await;
+    let mut scored = score_installed(
+        &provider,
+        &installed,
+        ram_gb,
+        vram_gb,
+        &vendor,
+        &task_type,
+        context.unwrap_or(DEFAULT_CONTEXT),
+    )
+    .await;
 
     scored.sort_by(|a, b| b.score.cmp(&a.score));
 
@@ -1161,7 +1224,11 @@ async fn get_model_rankings(
             name: m.name,
             family: m.family,
             purpose: m.purpose,
+            parameters: m.parameters,
+            quantization: m.quantization,
             size_gb: m.size_gb,
+            estimated_vram_gb: m.estimated_vram_gb,
+            estimated_ram_gb: m.estimated_ram_gb,
             score: m.score,
             reasons: m.breakdown,
         })
@@ -1312,7 +1379,8 @@ fn score_model(
 }
 
 #[tauri::command]
-async fn generate_text(
+async fn provider_generate(
+    provider: Option<ProviderConfig>,
     model: String,
     system_prompt: String,
     user_prompt: String,
@@ -1322,77 +1390,48 @@ async fn generate_text(
     max_tokens: u32,
     seed: u32,
     context_length: Option<u32>,
-) -> GenerateResponse {
-    let prompt = format!("System:\n{}\n\nUser:\n{}", system_prompt, user_prompt);
+) -> Result<GenerateResponse, String> {
+    let provider = provider.unwrap_or_default();
 
-    let request = OllamaRequest {
+    let params = GenerateParams {
         model,
-        prompt,
-        stream: false,
-
-        options: OllamaOptions {
-            temperature,
-            top_p,
-            top_k,
-            seed,
-            num_predict: max_tokens,
-            num_ctx: context_length.unwrap_or(DEFAULT_CONTEXT as u32),
-        },
+        system_prompt,
+        user_prompt,
+        temperature,
+        top_p,
+        top_k,
+        max_tokens,
+        seed,
+        context_length: context_length.unwrap_or(DEFAULT_CONTEXT as u32),
     };
 
-    let client = reqwest::Client::new();
+    let output = providers::generate(&provider, &params).await?;
 
-    let response = match client
-        .post("http://localhost:11434/api/generate")
-        .json(&request)
-        .send()
-        .await
-    {
-        Ok(response) => response,
-        Err(e) => {
-            return GenerateResponse {
-                text: format!("Ollama Error: could not connect to Ollama ({})", e),
-                tokens: 0,
-                generation_time: 0,
-            };
-        }
-    };
+    Ok(GenerateResponse {
+        text: output.text,
+        tokens: output.tokens,
+        generation_time: output.generation_time,
+    })
+}
 
-    let body = match response.text().await {
-        Ok(body) => body,
-        Err(e) => {
-            return GenerateResponse {
-                text: format!("Ollama Error: failed reading response ({})", e),
-                tokens: 0,
-                generation_time: 0,
-            };
-        }
-    };
+/// Downloads an Ollama model, emitting `pull-progress` events as it goes.
+#[tauri::command]
+async fn ollama_pull(
+    app: tauri::AppHandle,
+    provider: Option<ProviderConfig>,
+    model: String,
+) -> Result<(), String> {
+    let provider = provider.unwrap_or_default();
 
-    let result: OllamaResponse = match serde_json::from_str(&body) {
-        Ok(value) => value,
-
-        Err(_) => {
-            return GenerateResponse {
-                text: format!("Ollama Error: {}", body),
-                tokens: 0,
-                generation_time: 0,
-            };
-        }
-    };
-
-    GenerateResponse {
-        text: result.response,
-        tokens: result.eval_count.unwrap_or(0),
-        generation_time: result.eval_duration.unwrap_or(0) / 1_000_000,
-    }
+    providers::pull_model(&provider, &model, |progress| {
+        let _ = app.emit("pull-progress", progress);
+    })
+    .await
 }
 
 #[tauri::command]
-async fn check_ollama_status() -> bool {
-    let response = reqwest::get("http://localhost:11434/api/tags").await;
-
-    response.is_ok()
+async fn ollama_delete(provider: Option<ProviderConfig>, model: String) -> Result<(), String> {
+    providers::delete_model(&provider.unwrap_or_default(), &model).await
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1403,11 +1442,14 @@ pub fn run() {
         })
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
-            generate_text,
-            get_models,
+            provider_generate,
+            provider_models,
+            provider_status,
+            ollama_pull,
+            ollama_delete,
+            get_model_details,
             get_system_stats,
             get_gpu_stats,
-            check_ollama_status,
             get_gpu_info,
             get_all_gpus,
             recommend_gpu,
