@@ -115,3 +115,7 @@ stored locally in the app's storage.
 - **"Offline" / no models:** start your server, then check the address in Settings with **Test connection**. For Ollama, run `ollama serve` and `ollama pull llama3.2`.
 - **Server found but no models:** with LM Studio, Jan or llama.cpp, load a model first.
 - **GPU shows 0% or "Not Supported":** update your GPU driver; on AMD install ROCm's `rocm-smi`.
+
+## License
+
+Copyright (c) 2026 techistt. All rights reserved. See [LICENSE](LICENSE).

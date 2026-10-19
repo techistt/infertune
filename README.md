@@ -128,4 +128,4 @@ stored locally in the app's storage.
 
 ## License
 
-See [LICENSE](LICENSE).
+Copyright (c) 2026 techistt. All rights reserved. See [LICENSE](LICENSE).

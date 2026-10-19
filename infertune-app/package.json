@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.3.0",
   "description": "Hardware-aware tuning studio for local LLMs",
+  "license": "UNLICENSED",
   "type": "module",
   "scripts": {
     "dev": "vite",
