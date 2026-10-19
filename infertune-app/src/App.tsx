@@ -8,6 +8,8 @@ import Compare from "./pages/Compare";
 import Quality from "./pages/Quality";
 import AutoTune from "./pages/AutoTune";
 import FineTune from "./pages/FineTune";
+import Quantize from "./pages/Quantize";
+import Planner from "./pages/Planner";
 import Sessions from "./pages/Sessions";
 import Logs from "./pages/Logs";
 import Settings from "./pages/Settings";
@@ -46,6 +48,8 @@ function App() {
           {page === "quality" && <Quality />}
           {page === "autotune" && <AutoTune />}
           {page === "finetune" && <FineTune />}
+          {page === "quantize" && <Quantize />}
+          {page === "planner" && <Planner />}
           {page === "sessions" && <Sessions />}
           {page === "logs" && <Logs />}
           {page === "settings" && <Settings />}

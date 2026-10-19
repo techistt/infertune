@@ -3,7 +3,8 @@ export type QualityCategory =
   | "logic"
   | "knowledge"
   | "instructions"
-  | "code";
+  | "code"
+  | "custom";
 
 export const CATEGORY_LABEL: Record<QualityCategory, string> = {
   math: "Math",
@@ -11,6 +12,7 @@ export const CATEGORY_LABEL: Record<QualityCategory, string> = {
   knowledge: "Knowledge",
   instructions: "Instructions",
   code: "Code",
+  custom: "Custom",
 };
 
 export interface QualityQuestion {
@@ -240,4 +242,134 @@ export function snippet(answer: string, max = 140): string {
   const flat = answer.replace(/\s+/g, " ").trim();
 
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+export type MatchMode = "contains" | "exact" | "number" | "regex";
+
+export const MATCH_LABEL: Record<MatchMode, string> = {
+  contains: "Contains the text",
+  exact: "Exactly equals (ignoring quotes and punctuation)",
+  number: "Last number equals",
+  regex: "Matches regular expression",
+};
+
+/** A question written by the user. */
+export interface CustomQuestion {
+  id: string;
+  prompt: string;
+  expected: string;
+  mode: MatchMode;
+}
+
+export interface QuestionSet {
+  id: string;
+  name: string;
+  questions: CustomQuestion[];
+}
+
+/** Builds the checker for one custom question. Bad regexes never match. */
+export function makeCheck(q: CustomQuestion): (answer: string) => boolean {
+  const expected = q.expected.trim();
+
+  switch (q.mode) {
+    case "exact":
+      return (a) => plain(a).toLowerCase() === plain(expected).toLowerCase();
+    case "number": {
+      const want = Number(expected.replace(/,/g, ""));
+
+      return (a) => Number.isFinite(want) && lastNumber(a) === want;
+    }
+    case "regex":
+      return (a) => {
+        try {
+          return new RegExp(expected, "i").test(a);
+        } catch {
+          return false;
+        }
+      };
+    default:
+      return (a) => a.toLowerCase().includes(expected.toLowerCase());
+  }
+}
+
+/** Problems with a custom question, or null when it is usable. */
+export function validateQuestion(q: CustomQuestion): string | null {
+  if (!q.prompt.trim()) return "The question is empty.";
+  if (!q.expected.trim()) return "The expected answer is empty.";
+
+  if (q.mode === "number" && !Number.isFinite(Number(q.expected.trim().replace(/,/g, "")))) {
+    return "The expected answer must be a number.";
+  }
+
+  if (q.mode === "regex") {
+    try {
+      new RegExp(q.expected, "i");
+    } catch {
+      return "The regular expression is not valid.";
+    }
+  }
+
+  return null;
+}
+
+export function toQuestions(set: QuestionSet): QualityQuestion[] {
+  return set.questions.map((q) => ({
+    id: q.id,
+    category: "custom" as const,
+    prompt: q.prompt,
+    expected: q.expected,
+    check: makeCheck(q),
+  }));
+}
+
+const MODES: MatchMode[] = ["contains", "exact", "number", "regex"];
+
+export function serializeSet(set: QuestionSet): string {
+  return JSON.stringify(
+    { infertuneQuestionSet: 1, name: set.name, questions: set.questions },
+    null,
+    2
+  );
+}
+
+/** Reads an exported set; returns null when the text is not a valid set. */
+export function parseSet(text: string): Omit<QuestionSet, "id"> | null {
+  try {
+    const data = JSON.parse(text);
+
+    if (!data || data.infertuneQuestionSet !== 1 || !Array.isArray(data.questions)) {
+      return null;
+    }
+
+    const questions: CustomQuestion[] = [];
+
+    for (const raw of data.questions) {
+      if (
+        !raw ||
+        typeof raw.prompt !== "string" ||
+        typeof raw.expected !== "string" ||
+        !MODES.includes(raw.mode)
+      ) {
+        continue;
+      }
+
+      const q: CustomQuestion = {
+        id: `q${questions.length + 1}-${Math.random().toString(36).slice(2, 7)}`,
+        prompt: raw.prompt,
+        expected: raw.expected,
+        mode: raw.mode,
+      };
+
+      if (validateQuestion(q) === null) questions.push(q);
+    }
+
+    if (questions.length === 0) return null;
+
+    return {
+      name: typeof data.name === "string" && data.name.trim() ? data.name.trim() : "Imported set",
+      questions,
+    };
+  } catch {
+    return null;
+  }
 }

@@ -101,3 +101,13 @@ export async function deleteModel(
 ): Promise<void> {
   await invoke("ollama_delete", { provider, model });
 }
+
+/** Ollama only. Progress arrives through the "quantize-progress" event. */
+export async function quantizeModel(
+  provider: ProviderConfig,
+  source: string,
+  target: string,
+  quantize: string
+): Promise<void> {
+  await invoke("ollama_quantize", { provider, source, target, quantize });
+}

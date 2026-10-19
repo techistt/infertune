@@ -10,9 +10,12 @@ import { logger, errorMessage } from "../store/logStore";
 import { tokensPerSecond, formatDateTime } from "../utils/format";
 import { withHint } from "../utils/hints";
 import { notifyDone } from "../services/notify";
+import { useQuestionSetStore } from "../store/questionSetStore";
+import QuestionSetEditor from "../components/QuestionSetEditor";
 import {
   CATEGORY_LABEL,
   QUALITY_QUESTIONS,
+  toQuestions,
   grade,
   scoreAnswers,
   snippet,
@@ -36,6 +39,14 @@ export default function Quality() {
   const [step, setStep] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
+
+  const sets = useQuestionSetStore((s) => s.sets);
+  const [setId, setSetId] = useState("builtin");
+  const [editing, setEditing] = useState(false);
+
+  const customSet = sets.find((x) => x.id === setId) ?? null;
+  const setName = customSet ? customSet.name : "Built-in";
+  const questions = customSet ? toQuestions(customSet) : QUALITY_QUESTIONS;
 
   const cancelRef = useRef(false);
 
@@ -79,7 +90,7 @@ export default function Quality() {
     const speeds: number[] = [];
 
     try {
-      for (const q of QUALITY_QUESTIONS) {
+      for (const q of questions) {
         if (cancelRef.current) break;
 
         const result = await generateText(
@@ -124,7 +135,7 @@ export default function Quality() {
     }
 
     // Only save complete runs; partial scores would be misleading.
-    if (graded.length === QUALITY_QUESTIONS.length) {
+    if (graded.length === questions.length && questions.length > 0) {
       const score = scoreAnswers(graded);
 
       useHistoryStore.getState().addQualityRun({
@@ -132,6 +143,7 @@ export default function Quality() {
         createdAt: Date.now(),
         providerName: active.name,
         model,
+        setName,
         correct: score.correct,
         total: score.total,
         percent: score.percent,
@@ -153,9 +165,9 @@ export default function Quality() {
       <div className="rounded-xl border border-gray-800 bg-gray-900 p-5">
         <h2 className="text-xl font-semibold">Quality check</h2>
         <p className="mt-1 text-sm text-gray-400">
-          Asks the model {QUALITY_QUESTIONS.length} short questions (math, logic,
-          knowledge, instructions, code) at temperature 0 and grades the answers
-          automatically. Use it to see what a smaller or more compressed model
+          Asks the model {questions.length} short questions at temperature 0 and
+          grades the answers automatically. The built-in set covers math, logic,
+          knowledge, instructions and code; you can also write your own. Use it to see what a smaller or more compressed model
           gives up. It is a quick sanity check, not a full benchmark.
         </p>
 
@@ -177,6 +189,31 @@ export default function Quality() {
             </select>
           </div>
 
+          <div className="min-w-[12rem]">
+            <label className="mb-1 block text-xs text-gray-400">Question set</label>
+            <select
+              value={setId}
+              onChange={(e) => setSetId(e.target.value)}
+              disabled={running}
+              className="w-full rounded-lg bg-gray-800 p-2"
+            >
+              <option value="builtin">Built-in ({QUALITY_QUESTIONS.length})</option>
+              {sets.map((x) => (
+                <option key={x.id} value={x.id}>
+                  {x.name} ({x.questions.length})
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <button
+            onClick={() => setEditing((v) => !v)}
+            disabled={running}
+            className="rounded-lg bg-gray-700 px-3 py-2 hover:bg-gray-600 disabled:opacity-50"
+          >
+            {editing ? "Close editor" : "My question sets"}
+          </button>
+
           {running ? (
             <button
               onClick={() => (cancelRef.current = true)}
@@ -197,8 +234,8 @@ export default function Quality() {
 
         {running && (
           <p className="mt-3 text-sm text-gray-300">
-            Question {Math.min(step + 1, QUALITY_QUESTIONS.length)} of{" "}
-            {QUALITY_QUESTIONS.length}...
+            Question {Math.min(step + 1, questions.length)} of{" "}
+            {questions.length}...
           </p>
         )}
 
@@ -208,6 +245,8 @@ export default function Quality() {
           </p>
         )}
       </div>
+
+      {editing && <QuestionSetEditor onUse={(id) => setSetId(id)} />}
 
       <div className="rounded-xl border border-gray-800 bg-gray-900 p-5">
         <div className="mb-3 flex items-center justify-between">
@@ -242,7 +281,7 @@ export default function Quality() {
                     )}
                     <span className="font-medium break-all">{run.model}</span>
                     <span className="text-xs text-gray-500">
-                      {run.providerName} · {formatDateTime(run.createdAt)}
+                      {run.providerName} · {run.setName ?? "Built-in"} · {formatDateTime(run.createdAt)}
                     </span>
                   </button>
 

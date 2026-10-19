@@ -11,6 +11,8 @@ export type Page =
   | "quality"
   | "autotune"
   | "finetune"
+  | "quantize"
+  | "planner"
   | "sessions"
   | "logs"
   | "settings";

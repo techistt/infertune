@@ -54,6 +54,8 @@ export interface QualityRun {
   createdAt: number;
   providerName: string;
   model: string;
+  /** Name of the question set used (missing in older runs = built-in). */
+  setName?: string;
   correct: number;
   total: number;
   percent: number;

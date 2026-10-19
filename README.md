@@ -39,6 +39,9 @@ switch between them at any time.
 - **Benchmarks:** run one or more models through a preset or custom prompt for several runs with fixed settings. Records tokens/second, time, peak CPU / RAM / GPU / VRAM, GPU temperature and (NVIDIA) power draw with tokens per joule. Shows a speed chart and a trend over time per model. Results can be copied as Markdown or CSV, or exported as a standalone HTML report (print it to PDF).
 - **Quality check:** asks a model 12 short questions (math, logic, knowledge, instruction following, code) at temperature 0 and grades them automatically, so you can see what a smaller or more compressed model gives up. A quick sanity check, not a full benchmark.
 - **Auto-tune:** tries several context sizes (and, on Ollama, GPU layer splits) for one model, measures each, and highlights the fastest and a balanced option you can apply with one click. Settings that run out of memory are marked as failed.
+- **Custom quality sets:** write your own questions (contains / exact / number / regex checks), save them, import and export as JSON, and run them from the Quality page.
+- **Quantize (Ollama):** make a smaller Q8 / Q6 / Q5 / Q4 / Q3 / Q2 copy of a 16-bit or 32-bit model, then compare it with the original using Quality and Benchmarks.
+- **Planner:** enter a model's size and quantization to see how much VRAM and RAM each context length needs, and what fits your computer, before you download it.
 - **Fine-tune estimator:** a calculator for the GPU memory needed to fine-tune a model with QLoRA, LoRA or full fine-tuning. It does not train anything.
 - **Sessions:** every Playground and Compare generation is saved. Search, review the full settings and response, reopen in the Playground, copy as JSON or delete. Pick two sessions to compare their settings and see a word-level diff of the responses.
 - **Logs:** in-app log of connections, errors, downloads and benchmarks, with level filter, search and copy.
@@ -129,7 +132,7 @@ The installer can still be built by the GitHub Actions workflow (push a `v*` tag
 ## Releasing
 
 1. Bump the version in `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`.
-2. Commit, then tag and push: `git tag v0.4.0 && git push origin v0.4.0`.
+2. Commit, then tag and push: `git tag v0.5.0 && git push origin v0.5.0`.
 3. The **Build InferTune** workflow builds the Windows installer and attaches it to a draft GitHub release.
 
 The release workflow runs the type-check and both test suites first. Installers are unsigned. Windows SmartScreen will warn on first run until the

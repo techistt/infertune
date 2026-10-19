@@ -11,6 +11,8 @@ const TITLES: Record<Page, string> = {
   quality: "Quality",
   autotune: "Auto-tune",
   finetune: "Fine-tune",
+  quantize: "Quantize",
+  planner: "Planner",
   sessions: "Sessions",
   logs: "Logs",
   settings: "Settings",

@@ -10,6 +10,8 @@ import {
   ClipboardCheck,
   SlidersHorizontal,
   Dumbbell,
+  Minimize2,
+  Ruler,
   type LucideIcon,
 } from "lucide-react";
 import pkg from "../../package.json";
@@ -24,6 +26,8 @@ const menu: { icon: LucideIcon; label: string; page: Page }[] = [
   { icon: ClipboardCheck, label: "Quality", page: "quality" },
   { icon: SlidersHorizontal, label: "Auto-tune", page: "autotune" },
   { icon: Dumbbell, label: "Fine-tune", page: "finetune" },
+  { icon: Minimize2, label: "Quantize", page: "quantize" },
+  { icon: Ruler, label: "Planner", page: "planner" },
   { icon: FolderOpen, label: "Sessions", page: "sessions" },
   { icon: FileText, label: "Logs", page: "logs" },
   { icon: Settings, label: "Settings", page: "settings" },

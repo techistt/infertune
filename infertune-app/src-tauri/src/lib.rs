@@ -1586,6 +1586,24 @@ fn reveal_file(path: String) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Creates a quantized copy of an Ollama model, emitting `quantize-progress`
+/// events as it goes.
+#[tauri::command]
+async fn ollama_quantize(
+    app: tauri::AppHandle,
+    provider: Option<ProviderConfig>,
+    source: String,
+    target: String,
+    quantize: String,
+) -> Result<(), String> {
+    let provider = provider.unwrap_or_default();
+
+    providers::quantize_model(&provider, &source, &target, &quantize, |progress| {
+        let _ = app.emit("quantize-progress", progress);
+    })
+    .await
+}
+
 /// Downloads an Ollama model, emitting `pull-progress` events as it goes.
 #[tauri::command]
 async fn ollama_pull(
@@ -1731,6 +1749,7 @@ pub fn run() {
             provider_models,
             provider_status,
             ollama_pull,
+            ollama_quantize,
             ollama_delete,
             get_model_details,
             get_system_stats,

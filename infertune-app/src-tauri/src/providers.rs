@@ -563,11 +563,21 @@ pub async fn pull_model<F: FnMut(PullProgress)>(
         return Err(format!("Pull failed ({})", error_text(response).await));
     }
 
+    stream_progress(response, model, "Download", on_progress).await
+}
+
+/// Reads Ollama's newline-delimited progress stream until it ends.
+async fn stream_progress<F: FnMut(PullProgress)>(
+    response: reqwest::Response,
+    model: &str,
+    what: &str,
+    mut on_progress: F,
+) -> Result<(), String> {
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
 
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("Download interrupted: {}", e))?;
+        let chunk = chunk.map_err(|e| format!("{} interrupted: {}", what, e))?;
         buffer.push_str(&String::from_utf8_lossy(&chunk));
 
         while let Some(position) = buffer.find('\n') {
@@ -594,6 +604,59 @@ pub async fn pull_model<F: FnMut(PullProgress)>(
     }
 
     Ok(())
+}
+
+/// Quantization levels Ollama can create a model at.
+pub const QUANTIZATIONS: [&str; 14] = [
+    "q2_K", "q3_K_S", "q3_K_M", "q3_K_L", "q4_0", "q4_1", "q4_K_S", "q4_K_M", "q5_0", "q5_1",
+    "q5_K_S", "q5_K_M", "q6_K", "q8_0",
+];
+
+pub fn is_valid_quantization(value: &str) -> bool {
+    QUANTIZATIONS.contains(&value)
+}
+
+/// Creates `target` from `source` at a lower precision (Ollama only). The
+/// source must be a 16-bit or 32-bit model.
+pub async fn quantize_model<F: FnMut(PullProgress)>(
+    cfg: &ProviderConfig,
+    source: &str,
+    target: &str,
+    quantize: &str,
+    on_progress: F,
+) -> Result<(), String> {
+    if !cfg.is_ollama() {
+        return Err("Quantizing is only supported for Ollama".to_string());
+    }
+
+    if !is_valid_quantization(quantize) {
+        return Err(format!("Unknown quantization level: {}", quantize));
+    }
+
+    if target.trim().is_empty() || source.trim().is_empty() {
+        return Err("Source and new model names are required".to_string());
+    }
+
+    let url = format!("{}/api/create", cfg.root());
+
+    // "name" is what older Ollama versions call "model".
+    let response = authed(client()?.post(&url), cfg)
+        .json(&json!({
+            "model": target,
+            "name": target,
+            "from": source,
+            "quantize": quantize,
+            "stream": true
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("Could not connect to Ollama at {}: {}", cfg.root(), e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("Quantize failed ({})", error_text(response).await));
+    }
+
+    stream_progress(response, target, "Quantize", on_progress).await
 }
 
 pub async fn delete_model(cfg: &ProviderConfig, model: &str) -> Result<(), String> {
@@ -634,6 +697,14 @@ mod tests {
 
         cfg.base_url = "".into();
         assert_eq!(cfg.root(), DEFAULT_OLLAMA_URL);
+    }
+
+    #[test]
+    fn quantization_names_are_checked() {
+        assert!(is_valid_quantization("q4_K_M"));
+        assert!(is_valid_quantization("q8_0"));
+        assert!(!is_valid_quantization("q4_k_m"));
+        assert!(!is_valid_quantization("fp8; rm"));
     }
 
     #[test]
